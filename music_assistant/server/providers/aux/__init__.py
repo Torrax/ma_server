@@ -58,8 +58,6 @@ class AUXProvider(MusicProvider):
     async def handle_setup(self) -> None:
         """Enter Basic Setup Here"""
         # Create a virtual radio and add to the internal state
-        radio_station = Radio(
-
         radio = Radio(
             provider=self.domain,
             item_id="AUX",  # Unique ID for the AUX radio station.
