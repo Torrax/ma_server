@@ -69,6 +69,7 @@ class AUXProvider(MusicProvider):
                     provider_instance=self.instance_id,
                 )
             },
+        )
 
     async def get_audio_stream(self, streamdetails: StreamDetails) -> AsyncGenerator[bytes, None]:
         """Return the audio stream for the AUX provider item."""
