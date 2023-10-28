@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 from music_assistant.common.models.config_entries import ConfigEntry
 from music_assistant.common.models.media_items import Radio, ProviderMapping, StreamDetails, AudioFormat, ContentType, MediaType
-from music_assistant.helpers.process import AsyncProcess
+from music_assistant.server.helpers.process import AsyncProcess
 from music_assistant.server.models.music_provider import MusicProvider
 
 if TYPE_CHECKING:
