@@ -70,6 +70,7 @@ class AUXProvider(MusicProvider):
                 )
             },
         )
+        await self.radio_controller.add_item_to_library(radio)
 
     async def get_audio_stream(self, streamdetails: StreamDetails) -> AsyncGenerator[bytes, None]:
         """Return the audio stream for the AUX provider item."""
