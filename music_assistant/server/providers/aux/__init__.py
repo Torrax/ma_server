@@ -54,17 +54,23 @@ async def get_config_entries(
     return tuple()  # we do not have any config entries (yet)
 
 class AUXProvider(MusicProvider):
+    radios = []
+
     async def handle_setup(self) -> None:
-        """Enter Basic Setup Here 
-        """
+        """Enter Basic Setup Here"""
+        # Create a virtual radio and add to the internal state
+        virtual_radio = await self.get_radio_details("aux_virtual_radio")
+        self.radios.append(virtual_radio)
 
     async def get_radio_details(self, item_id: str) -> Radio:
         """Return Virtual Radio details for a given item_id."""
-        return Radio(
-            provider=self.instance_id,
-            item_id=item_id,
-            name="AUX",
-        )
+        # Return the virtual radio details if queried
+        if item_id == "aux_virtual_radio":
+            return Radio(
+                provider=self.instance_id,
+                item_id=item_id,
+                name="AUX Virtual Radio",
+            )
 
     async def get_audio_stream(self, streamdetails: StreamDetails) -> AsyncGenerator[bytes, None]:
         """Return the audio stream for the AUX provider item."""
