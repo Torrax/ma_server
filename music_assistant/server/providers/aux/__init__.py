@@ -59,18 +59,13 @@ class AUXProvider(MusicProvider):
     async def handle_setup(self) -> None:
         """Enter Basic Setup Here"""
         # Create a virtual radio and add to the internal state
-        virtual_radio = await self.get_radio_details("aux_virtual_radio")
-        self.radios.append(virtual_radio)
-
-    async def get_radio_details(self, item_id: str) -> Radio:
-        """Return Virtual Radio details for a given item_id."""
-        # Return the virtual radio details if queried
-        if item_id == "aux_virtual_radio":
-            return Radio(
-                provider=self.instance_id,
-                item_id=item_id,
-                name="AUX Virtual Radio",
-            )
+        radio_station = Radio(
+            provider=self.instance_id,
+            item_id="AUX",  # This can be a unique ID for the AUX radio station.
+            title="AUX",
+            description="AUX sound card input",
+            image_url="",  # Placeholder, can be updated with an image URL if needed.
+        )
 
     async def get_audio_stream(self, streamdetails: StreamDetails) -> AsyncGenerator[bytes, None]:
         """Return the audio stream for the AUX provider item."""
