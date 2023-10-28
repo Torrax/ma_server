@@ -51,7 +51,7 @@ async def get_config_entries(
     action: [optional] action key called from config entries UI.
     values: the (intermediate) raw values for config entries sent with the action.
     """
-    return tuple()  # we do not have any config entries (yet)
+    return tuple()  # we do not have any config entries
 
 class AUXProvider(MusicProvider):
     radios = []
@@ -61,10 +61,9 @@ class AUXProvider(MusicProvider):
         # Create a virtual radio and add to the internal state
         radio_station = Radio(
             provider=self.instance_id,
-            item_id="AUX",  # This can be a unique ID for the AUX radio station.
+            item_id="AUX",  # Unique ID for the AUX radio station.
             title="AUX",
             description="AUX sound card input",
-            image_url="",  # Placeholder, can be updated with an image URL if needed.
         )
 
     async def get_audio_stream(self, streamdetails: StreamDetails) -> AsyncGenerator[bytes, None]:
