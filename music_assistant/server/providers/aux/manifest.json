@@ -1,0 +1,13 @@
+{
+    "type": "music",
+    "domain": "aux",
+    "name": "Aux",
+    "description": "Streams audio from the local sound card to Music Assistant.",
+    "version": "0.2",
+    "documentation": "https://github.com/music-assistant/hass-music-assistant/discussions/categories/music-providers",
+    "dependencies": [],
+    "codeowners": ["@Torrax"],
+    "requirements": ["ffmpeg"],
+    "config_flow": true,
+    "main_class": "AuxProvider"
+}
