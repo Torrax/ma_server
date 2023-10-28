@@ -3,15 +3,16 @@
 This creates a virtual radio output that streams sound output encoded via ffmpeg from 
 the sound card to Music Assistant.
 """
+
 from __future__ import annotations
 
-import os
 import subprocess
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING
 
 from music_assistant.common.models.config_entries import ConfigEntry
-from music_assistant.common.models.media_items import Radio, ProviderMapping
+from music_assistant.common.models.media_items import Radio, ProviderMapping, StreamDetails, AudioFormat, ContentType, MediaType
+from music_assistant.helpers.process import AsyncProcess
 from music_assistant.server.models.music_provider import MusicProvider
 
 if TYPE_CHECKING:
@@ -20,47 +21,39 @@ if TYPE_CHECKING:
     from music_assistant.server import MusicAssistant
     from music_assistant.server.models import ProviderInstanceType
 
-
 FFMPEG_CMD = [
     "ffmpeg",
-    "-f", "alsa",           # Audio format (ALSA)
-    "-i", "default",        # Input source (default sound card)
-    "-f", "mp3",            # Output format (MP3)
-    "-acodec", "libmp3lame", # MP3 codec
-    "-",                    # Pipe the output
+    "-f", "alsa",
+    "-i", "default",
+    "-f", "mp3",
+    "-acodec", "libmp3lame",
+    "-",
 ]
 
 async def setup(
     mass: MusicAssistant, manifest: ProviderManifest, config: ProviderConfig
 ) -> ProviderInstanceType:
-    """Initialize provider(instance) with given configuration."""
     prov = AUXProvider(mass, manifest, config)
     await prov.handle_setup()
     return prov
-    
+
 async def get_config_entries(
     mass: MusicAssistant,
     instance_id: str | None = None,
     action: str | None = None,
     values: dict[str, ConfigValueType] | None = None,
 ) -> tuple[ConfigEntry, ...]:
-    """
-    Return Config entries to setup this provider.
-
-    instance_id: id of an existing provider instance (None if new instance setup).
-    action: [optional] action key called from config entries UI.
-    values: the (intermediate) raw values for config entries sent with the action.
-    """
-    return tuple()  # we do not have any config entries
+    return tuple()
 
 class AUXProvider(MusicProvider):
 
     async def handle_setup(self) -> None:
-        """Enter Basic Setup Here"""
-        # Create a virtual radio and add to the internal state
+        pass
+
+    async def get_library_radios(self) -> AsyncGenerator[Radio, None]:
         radio = Radio(
             provider=self.domain,
-            item_id="AUX",  # Unique ID for the AUX radio station.
+            item_id="AUX",
             name="AUX",
             provider_mappings={
                 ProviderMapping(
@@ -70,12 +63,41 @@ class AUXProvider(MusicProvider):
                 )
             },
         )
+        yield radio
+
+    async def get_radio(self, prov_radio_id: str) -> Radio:
+        if prov_radio_id == "AUX":
+            return Radio(
+                provider=self.domain,
+                item_id="AUX",
+                name="AUX",
+                provider_mappings={
+                    ProviderMapping(
+                        item_id="AUX",
+                        provider_domain=self.domain,
+                        provider_instance=self.instance_id,
+                    )
+                },
+            )
+        else:
+            raise Exception(f"Radio {prov_radio_id} not found")
+
+    async def get_stream_details(self, item_id: str) -> StreamDetails:
+        return StreamDetails(
+            provider=self.instance_id,
+            item_id=item_id,
+            content_type=ContentType.MP3,
+            audio_format=AudioFormat(
+                content_type=ContentType.MP3,
+                sample_rate=44100,
+                channels=2,
+                bitrate=192,
+            ),
+            media_type=MediaType.RADIO,
+            data="AUX",
+        )
 
     async def get_audio_stream(self, streamdetails: StreamDetails) -> AsyncGenerator[bytes, None]:
-        """Return the audio stream for the AUX provider item."""
-        proc = subprocess.Popen(FFMPEG_CMD, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        while True:
-            chunk = proc.stdout.read(4096)  # Read in chunks of 4KB
-            if not chunk:
-                break
-            yield chunk
+        async with AsyncProcess(FFMPEG_CMD) as ffmpeg_proc:
+            async for chunk in ffmpeg_proc.iter_any():
+                yield chunk
