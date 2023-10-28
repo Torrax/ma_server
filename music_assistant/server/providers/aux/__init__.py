@@ -60,10 +60,9 @@ class AUXProvider(MusicProvider):
         """Enter Basic Setup Here"""
         # Create a virtual radio and add to the internal state
         radio_station = Radio(
-            provider=self.instance_id,
+            provider=self.domain,
             item_id="AUX",  # Unique ID for the AUX radio station.
-            title="AUX",
-            description="AUX sound card input",
+            name="AUX",
         )
 
     async def get_audio_stream(self, streamdetails: StreamDetails) -> AsyncGenerator[bytes, None]:
