@@ -64,7 +64,6 @@ class AUXProvider(MusicProvider):
         yield await self.get_radio("AUX")
 
     async def get_radio(self, prov_radio_id: str) -> Radio:
-        if prov_radio_id == "AUX":
             return Radio(
                 provider=self.domain,
                 item_id="AUX",
@@ -77,8 +76,6 @@ class AUXProvider(MusicProvider):
                     )
                 },
             )
-        else:
-            raise Exception(f"Radio {prov_radio_id} not found")
 
     async def get_stream_details(self, item_id: str) -> StreamDetails:
         return StreamDetails(
