@@ -28,6 +28,9 @@ FFMPEG_CMD = [
     "-i", "default",
     "-f", "mp3",
     "-acodec", "libmp3lame",
+    "-ar", "44100",  # sample rate
+    "-ac", "2",      # channels
+    "-b:a", "192k",  # bitrate
     "-",
 ]
 
@@ -64,6 +67,7 @@ class AUXProvider(MusicProvider):
         yield await self.get_radio("AUX")
 
     async def get_radio(self, prov_radio_id: str) -> Radio:
+#        if prov_radio_id == "AUX":
             return Radio(
                 provider=self.domain,
                 item_id="AUX",
@@ -76,6 +80,8 @@ class AUXProvider(MusicProvider):
                     )
                 },
             )
+#        else:
+#            raise Exception(f"Radio {prov_radio_id} not found")
 
     async def get_stream_details(self, item_id: str) -> StreamDetails:
         return StreamDetails(
