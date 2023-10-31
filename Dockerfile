@@ -58,6 +58,7 @@ RUN set -x \
         cifs-utils \
         libnfs-utils \
         libjemalloc2 \
+        alsa-utils \
     # cleanup
     && rm -rf /tmp/* \
     && rm -rf /var/lib/apt/lists/*
