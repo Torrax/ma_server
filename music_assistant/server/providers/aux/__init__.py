@@ -6,7 +6,6 @@ the sound card to Music Assistant.
 
 from __future__ import annotations
 
-import subprocess
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING
 
