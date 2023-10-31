@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 from music_assistant.common.models.config_entries import ConfigEntry
 from music_assistant.common.models.media_items import Radio, ProviderMapping, StreamDetails, AudioFormat, ContentType, MediaType
 from music_assistant.server.helpers.process import AsyncProcess
+from music_assistant.common.models.enums import ConfigEntryType, ProviderFeature
 from music_assistant.server.models.music_provider import MusicProvider
 
 if TYPE_CHECKING:
@@ -29,6 +30,10 @@ FFMPEG_CMD = [
     "-acodec", "libmp3lame",
     "-",
 ]
+
+SUPPORTED_FEATURES = (
+    ProviderFeature.LIBRARY_RADIOS,
+)
 
 async def setup(
     mass: MusicAssistant, manifest: ProviderManifest, config: ProviderConfig
@@ -47,23 +52,16 @@ async def get_config_entries(
 
 class AUXProvider(MusicProvider):
 
+    @property
+    def supported_features(self) -> tuple[ProviderFeature, ...]:
+        """Return the features supported by this Provider."""
+        return SUPPORTED_FEATURES
+
     async def handle_setup(self) -> None:
         pass
 
     async def get_library_radios(self) -> AsyncGenerator[Radio, None]:
-        radio = Radio(
-            provider=self.domain,
-            item_id="AUX",
-            name="AUX",
-            provider_mappings={
-                ProviderMapping(
-                    item_id="AUX",
-                    provider_domain=self.domain,
-                    provider_instance=self.instance_id,
-                )
-            },
-        )
-        yield radio
+        yield await self.get_radio("AUX")
 
     async def get_radio(self, prov_radio_id: str) -> Radio:
         if prov_radio_id == "AUX":
