@@ -86,15 +86,13 @@ class AUXProvider(MusicProvider):
         return StreamDetails(
             provider=self.instance_id,
             item_id=item_id,
-            content_type=ContentType.MP3,
             audio_format=AudioFormat(
                 content_type=ContentType.MP3,
                 sample_rate=44100,
                 channels=2,
-                bitrate=192,
+                bit_rate=192,
             ),
             media_type=MediaType.RADIO,
-            data="AUX",
         )
 
     async def get_audio_stream(self, streamdetails: StreamDetails) -> AsyncGenerator[bytes, None]:
