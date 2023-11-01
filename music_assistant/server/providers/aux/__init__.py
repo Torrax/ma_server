@@ -4,11 +4,6 @@ This creates a virtual radio output that streams sound output encoded via ffmpeg
 the sound card to Music Assistant.
 """
 
-import logging
-
-# This will configure logging to write to a file with INFO level messages and above.
-logging.basicConfig(filename='/data/logfile.log', level=logging.INFO)
-
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
@@ -102,7 +97,5 @@ class AUXProvider(MusicProvider):
 
     async def get_audio_stream(self, streamdetails: StreamDetails) -> AsyncGenerator[bytes, None]:
         async with AsyncProcess(FFMPEG_CMD) as ffmpeg_proc:
-            logging.info("Streaming audio info")
             async for chunk in ffmpeg_proc.iter_any():
-                logging.info(f"Streaming chunk of size {len(chunk)} bytes")
                 yield chunk
