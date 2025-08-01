@@ -5,8 +5,9 @@
 ARG BASE_IMAGE_VERSION=latest
 FROM music-assistant-base:$BASE_IMAGE_VERSION AS builder
 
-ADD dist dist
-COPY requirements_all.txt .
+# Copy source code instead of dist
+COPY . /app/src
+WORKDIR /app/src
 
 # ensure UV is installed
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
@@ -21,12 +22,11 @@ RUN uv pip install \
     --find-links "https://wheels.home-assistant.io/musllinux/" \
     -r requirements_all.txt
 
-# Install Music Assistant from prebuilt wheel
-ARG MASS_VERSION
+# Install Music Assistant directly from source
 RUN uv pip install \
     --no-cache \
     --find-links "https://wheels.home-assistant.io/musllinux/" \
-    "music-assistant@dist/music_assistant-${MASS_VERSION}-py3-none-any.whl"
+    .
 
 # we need to set (very permissive) permissions to the workdir
 # and /tmp to allow running the container as non-root
