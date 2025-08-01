@@ -22,13 +22,12 @@ from music_assistant_models.enums import (
     StreamType,
 )
 from music_assistant_models.errors import MediaNotFoundError, ProviderUnavailableError
-from music_assistant_models.media_items import AudioFormat, PluginSourceMediaItem
+from music_assistant_models.media_items import AudioFormat, Track, ProviderMapping
 from music_assistant.helpers.process import AsyncProcess
 from music_assistant.models.music_provider import MusicProvider
 from music_assistant.models.plugin import PluginProvider, PluginSource
 
 if TYPE_CHECKING:
-    from music_assistant_models.media_items import BrowseFolder, MediaItem, SearchResults
     from music_assistant_models.provider import ProviderManifest
 
     from music_assistant.mass import MusicAssistant
@@ -301,7 +300,7 @@ class BluetoothInputProvider(PluginProvider, MusicProvider):
         search_query: str,
         media_types: list[MediaType] | None = None,
         limit: int = 10,
-    ) -> SearchResults:
+    ):
         """Perform search on the provider."""
         # Return empty search results since this is just for browsing
         from music_assistant_models.media_items import SearchResults
@@ -309,60 +308,66 @@ class BluetoothInputProvider(PluginProvider, MusicProvider):
 
     async def browse_folder(
         self, path: str | None = None
-    ) -> list[MediaItem | BrowseFolder]:
+    ):
         """Browse folder."""
         if path is None or path == "":
-            # Root level - return the Bluetooth input source
-            bluetooth_source = PluginSourceMediaItem(
-                item_id=self.instance_id,
+            # Root level - return the Bluetooth input source as a Track
+            bluetooth_source = Track(
+                item_id="bluetooth_input",
                 provider=self.instance_id,
                 name="Bluetooth Audio Input",
                 provider_mappings={
-                    self.instance_id: self.instance_id
+                    ProviderMapping(
+                        item_id="bluetooth_input",
+                        provider_domain=self.domain,
+                        provider_instance=self.instance_id,
+                    )
                 },
-                custom_data={"source_id": self.instance_id}
             )
             return [bluetooth_source]
         
         # No subfolders
         return []
 
-    async def get_library_artists(self) -> AsyncGenerator[MediaItem, None]:
+    async def get_library_artists(self) -> AsyncGenerator:
         """Retrieve library artists from the provider."""
         return
         yield  # pragma: no cover
 
-    async def get_library_albums(self) -> AsyncGenerator[MediaItem, None]:
+    async def get_library_albums(self) -> AsyncGenerator:
         """Retrieve library albums from the provider."""
         return
         yield  # pragma: no cover
 
-    async def get_library_tracks(self) -> AsyncGenerator[MediaItem, None]:
+    async def get_library_tracks(self) -> AsyncGenerator:
         """Retrieve library tracks from the provider."""
         return
         yield  # pragma: no cover
 
-    async def get_library_playlists(self) -> AsyncGenerator[MediaItem, None]:
+    async def get_library_playlists(self) -> AsyncGenerator:
         """Retrieve library playlists from the provider."""
         return
         yield  # pragma: no cover
 
-    async def get_library_radios(self) -> AsyncGenerator[MediaItem, None]:
+    async def get_library_radios(self) -> AsyncGenerator:
         """Retrieve library radio stations from the provider."""
         return
         yield  # pragma: no cover
 
-    async def get_item(self, media_type: MediaType, item_id: str) -> MediaItem:
+    async def get_item(self, media_type: MediaType, item_id: str):
         """Get single media item by id."""
-        if media_type == MediaType.PLUGIN_SOURCE and item_id == self.instance_id:
-            return PluginSourceMediaItem(
-                item_id=self.instance_id,
+        if media_type == MediaType.TRACK and item_id == "bluetooth_input":
+            return Track(
+                item_id="bluetooth_input",
                 provider=self.instance_id,
                 name="Bluetooth Audio Input",
                 provider_mappings={
-                    self.instance_id: self.instance_id
+                    ProviderMapping(
+                        item_id="bluetooth_input",
+                        provider_domain=self.domain,
+                        provider_instance=self.instance_id,
+                    )
                 },
-                custom_data={"source_id": self.instance_id}
             )
         
         raise MediaNotFoundError(f"Item {item_id} not found")
