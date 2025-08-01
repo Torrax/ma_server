@@ -105,8 +105,8 @@ async def get_config_entries(
             key=CONF_BUFFER_SIZE,
             type=ConfigEntryType.INTEGER,
             label="Buffer Size",
-            description="Audio buffer size in milliseconds",
-            default_value=100,
+            description="Audio buffer size in milliseconds (lower = less delay)",
+            default_value=50,
             required=False,
         ),
         ConfigEntry(
@@ -316,12 +316,14 @@ class BluetoothInputProvider(MusicProvider):
         channels = self.config.get_value(CONF_CHANNELS)
         buffer_size = self.config.get_value(CONF_BUFFER_SIZE)
         
-        # Use arecord piped to ffmpeg since FFmpeg doesn't have ALSA support in this container
-        # Build the piped command with low-latency optimizations
+        # Use arecord piped to ffmpeg with low-latency real-time streaming optimizations
+        # Based on builtin_player implementation for near real-time performance
         command = (
-            f"arecord -D {device} -f S16_LE -r {sample_rate} -c {channels} -t raw --buffer-size={buffer_size * sample_rate // 1000} | "
-            f"ffmpeg -f s16le -ar {sample_rate} -ac {channels} -i - "
-            f"-acodec pcm_s16le -f s16le -flush_packets 1 -fflags +nobuffer -flags +low_delay -"
+            f"arecord -D {device} -f S16_LE -r {sample_rate} -c {channels} -t raw | "
+            f"ffmpeg -f s16le -ar {sample_rate} -ac {channels} "
+            f"-readrate 1.0 -readrate_initial_burst 0.5 "
+            f"-i - -acodec pcm_s16le -f s16le "
+            f"-fflags +nobuffer -flags +low_delay -probesize 32 -analyzeduration 0 -"
         )
         
         try:
