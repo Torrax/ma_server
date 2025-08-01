@@ -21,6 +21,7 @@ from music_assistant_models.enums import (
     MediaType,
     ProviderFeature,
     StreamType,
+    VolumeNormalizationMode,
 )
 from music_assistant_models.errors import MediaNotFoundError, ProviderUnavailableError
 from music_assistant_models.media_items import (
@@ -35,6 +36,7 @@ from music_assistant_models.streamdetails import StreamDetails
 
 from music_assistant.helpers.process import AsyncProcess
 from music_assistant.models.music_provider import MusicProvider
+from music_assistant.models.plugin import PluginProvider
 
 if TYPE_CHECKING:
     from music_assistant_models.provider import ProviderManifest
@@ -322,50 +324,23 @@ class BluetoothInputProvider(MusicProvider):
         # Calculate period size for low latency (buffer_size in ms to samples)
         period_size = max(64, int(sample_rate * buffer_size / 1000))
         
-        # Use optimized arecord with minimal buffering piped to ffmpeg
-        # This approach is more reliable than direct FFmpeg ALSA capture
-        arecord_cmd = [
+        # Use direct arecord for minimal latency - no FFmpeg processing
+        # This eliminates the FFmpeg processing delay entirely
+        command = [
             "arecord",
             "-D", device,
             "-f", "S16_LE",
             "-r", str(sample_rate),
             "-c", str(channels),
             "-t", "raw",
-            "--buffer-size", str(period_size * 4),  # Small buffer for low latency
+            "--buffer-size", str(period_size * 2),  # Minimal buffer for lowest latency
             "--period-size", str(period_size),
         ]
-        
-        ffmpeg_cmd = [
-            "ffmpeg",
-            "-hide_banner",
-            "-loglevel", "error",
-            # Input from stdin (arecord output)
-            "-f", "s16le",
-            "-ar", str(sample_rate),
-            "-ac", str(channels),
-            "-i", "-",
-            # Real-time optimizations
-            "-fflags", "+nobuffer+flush_packets",
-            "-flags", "+low_delay",
-            "-probesize", "32",
-            "-analyzeduration", "0",
-            # Output format - raw PCM
-            "-acodec", "pcm_s16le",
-            "-f", "s16le",
-            # Output to stdout
-            "-"
-        ]
-        
-        # Combine commands with pipe
-        command = " | ".join([
-            " ".join(f'"{arg}"' if " " in arg else arg for arg in arecord_cmd),
-            " ".join(f'"{arg}"' if " " in arg else arg for arg in ffmpeg_cmd)
-        ])
         
         try:
             self.logger.info("Starting audio capture from device: %s", device)
             self._capture_process = AsyncProcess(
-                ["sh", "-c", command],
+                command,
                 stdin=False,
                 stdout=True,
                 stderr=True,
@@ -410,13 +385,13 @@ class BluetoothInputProvider(MusicProvider):
                 # Check if process is still running
                 if self._capture_process.closed or self._capture_process.returncode is not None:
                     if restart_count >= max_restarts:
-                        self.logger.error("FFmpeg process died too many times (%d), stopping capture", restart_count)
+                        self.logger.error("Audio capture process died too many times (%d), stopping capture", restart_count)
                         # Log stderr for debugging
                         if self._capture_process and hasattr(self._capture_process, 'stderr'):
                             try:
                                 stderr_data = await self._capture_process.stderr.read()
                                 if stderr_data:
-                                    self.logger.error("FFmpeg stderr: %s", stderr_data.decode())
+                                    self.logger.error("Audio capture stderr: %s", stderr_data.decode())
                             except Exception:
                                 pass
                         await self._stop_capture()
