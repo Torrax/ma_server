@@ -123,12 +123,51 @@ async def get_config_entries(
     )
 
 
-async def _get_audio_devices() -> list[tuple[str, str]]:
+async def _get_audio_devices() -> dict[str, str]:
     """Get list of available audio input devices."""
-    devices = [("default", "Default Audio Device")]
+    devices = {"default": "Default Audio Device"}
     
     try:
-        # Try to get audio devices using FFmpeg
+        # Try to get audio devices using arecord (part of alsa-utils)
+        proc = await asyncio.create_subprocess_exec(
+            "arecord", "-l",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        
+        if proc.returncode == 0 and stdout:
+            # Parse arecord output for capture devices
+            output = stdout.decode()
+            lines = output.split('\n')
+            
+            for line in lines:
+                if 'card' in line and 'device' in line:
+                    # Example: "card 1: USB [USB Audio], device 0: USB Audio [USB Audio]"
+                    try:
+                        # Extract card number and name
+                        card_part = line.split('card ')[1]
+                        card_num = card_part.split(':')[0].strip()
+                        card_name = card_part.split('[')[1].split(']')[0]
+                        
+                        # Extract device number
+                        device_part = line.split('device ')[1]
+                        device_num = device_part.split(':')[0].strip()
+                        
+                        device_id = f"hw:{card_num},{device_num}"
+                        device_label = f"Card {card_num}: {card_name} (Device {device_num})"
+                        devices[device_id] = device_label
+                        
+                        # Also add simplified hw:card format
+                        simple_device_id = f"hw:{card_num}"
+                        simple_label = f"Card {card_num}: {card_name}"
+                        if simple_device_id not in devices:
+                            devices[simple_device_id] = simple_label
+                            
+                    except (IndexError, ValueError):
+                        continue
+        
+        # Also try FFmpeg as fallback
         proc = await asyncio.create_subprocess_exec(
             "ffmpeg", "-f", "alsa", "-list_devices", "true", "-i", "dummy",
             stdout=asyncio.subprocess.PIPE,
@@ -137,25 +176,39 @@ async def _get_audio_devices() -> list[tuple[str, str]]:
         stdout, stderr = await proc.communicate()
         
         # Parse device list from stderr (FFmpeg outputs device list to stderr)
-        output = stderr.decode() if stderr else ""
-        lines = output.split('\n')
-        
-        for line in lines:
-            if '[alsa @' in line and 'card' in line:
-                # Extract device name from FFmpeg output
-                if 'card' in line and ':' in line:
-                    parts = line.split(':')
-                    if len(parts) >= 2:
-                        device_name = parts[1].strip().split(']')[0]
-                        device_id = f"hw:{device_name}"
-                        devices.append((device_id, f"ALSA: {device_name}"))
+        if stderr:
+            output = stderr.decode()
+            lines = output.split('\n')
+            
+            for line in lines:
+                if '[alsa @' in line and 'card' in line and 'USB' in line:
+                    # Look specifically for USB audio devices
+                    if 'card' in line and ':' in line:
+                        parts = line.split(':')
+                        if len(parts) >= 2:
+                            device_name = parts[1].strip().split(']')[0]
+                            device_id = f"hw:{device_name}"
+                            device_label = f"USB Audio: {device_name}"
+                            if device_id not in devices:
+                                devices[device_id] = device_label
+                                
     except Exception:
-        # Fallback to common device names if FFmpeg detection fails
-        devices.extend([
-            ("hw:0", "Hardware Device 0"),
-            ("hw:1", "Hardware Device 1"),
-            ("pulse", "PulseAudio"),
-        ])
+        # Fallback to common device names if detection fails
+        pass
+    
+    # Add common fallback devices
+    fallback_devices = {
+        "hw:0": "Hardware Device 0",
+        "hw:1": "Hardware Device 1", 
+        "hw:2": "Hardware Device 2",
+        "pulse": "PulseAudio",
+        "plughw:0": "Plug Hardware Device 0",
+        "plughw:1": "Plug Hardware Device 1",
+    }
+    
+    for device_id, device_label in fallback_devices.items():
+        if device_id not in devices:
+            devices[device_id] = device_label
     
     return devices
 
