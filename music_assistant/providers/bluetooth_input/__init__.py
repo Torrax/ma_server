@@ -17,15 +17,18 @@ from music_assistant_models.config_entries import ConfigEntry, ConfigValueType, 
 from music_assistant_models.enums import (
     ConfigEntryType,
     ContentType,
+    MediaType,
     ProviderFeature,
     StreamType,
 )
-from music_assistant_models.errors import ProviderUnavailableError
-from music_assistant_models.media_items import AudioFormat
+from music_assistant_models.errors import MediaItemNotFoundError, ProviderUnavailableError
+from music_assistant_models.media_items import AudioFormat, PluginSourceMediaItem
 from music_assistant.helpers.process import AsyncProcess
+from music_assistant.models.music_provider import MusicProvider
 from music_assistant.models.plugin import PluginProvider, PluginSource
 
 if TYPE_CHECKING:
+    from music_assistant_models.media_items import BrowseFolder, MediaItem, SearchResults
     from music_assistant_models.provider import ProviderManifest
 
     from music_assistant.mass import MusicAssistant
@@ -109,7 +112,7 @@ async def get_config_entries(
     )
 
 
-class BluetoothInputProvider(PluginProvider):
+class BluetoothInputProvider(PluginProvider, MusicProvider):
     """Provider for capturing audio from Bluetooth input devices as a Plugin Source."""
 
     def __init__(self, mass: MusicAssistant, manifest: ProviderManifest, config: ProviderConfig):
@@ -125,6 +128,7 @@ class BluetoothInputProvider(PluginProvider):
         """Return the features supported by this Provider."""
         return {
             ProviderFeature.AUDIO_SOURCE,
+            ProviderFeature.BROWSE,
         }
 
     async def loaded_in_mass(self) -> None:
@@ -290,3 +294,75 @@ class BluetoothInputProvider(PluginProvider):
             except Exception as err:
                 self.logger.error("Error in capture monitor: %s", err)
                 await asyncio.sleep(5)
+
+    # Music Provider methods for browsing functionality
+    async def search(
+        self,
+        search_query: str,
+        media_types: list[MediaType] | None = None,
+        limit: int = 10,
+    ) -> SearchResults:
+        """Perform search on the provider."""
+        # Return empty search results since this is just for browsing
+        from music_assistant_models.media_items import SearchResults
+        return SearchResults()
+
+    async def browse_folder(
+        self, path: str | None = None
+    ) -> list[MediaItem | BrowseFolder]:
+        """Browse folder."""
+        if path is None or path == "":
+            # Root level - return the Bluetooth input source
+            bluetooth_source = PluginSourceMediaItem(
+                item_id=self.instance_id,
+                provider=self.instance_id,
+                name="Bluetooth Audio Input",
+                provider_mappings={
+                    self.instance_id: self.instance_id
+                },
+                custom_data={"source_id": self.instance_id}
+            )
+            return [bluetooth_source]
+        
+        # No subfolders
+        return []
+
+    async def get_library_artists(self) -> AsyncGenerator[MediaItem, None]:
+        """Retrieve library artists from the provider."""
+        return
+        yield  # pragma: no cover
+
+    async def get_library_albums(self) -> AsyncGenerator[MediaItem, None]:
+        """Retrieve library albums from the provider."""
+        return
+        yield  # pragma: no cover
+
+    async def get_library_tracks(self) -> AsyncGenerator[MediaItem, None]:
+        """Retrieve library tracks from the provider."""
+        return
+        yield  # pragma: no cover
+
+    async def get_library_playlists(self) -> AsyncGenerator[MediaItem, None]:
+        """Retrieve library playlists from the provider."""
+        return
+        yield  # pragma: no cover
+
+    async def get_library_radios(self) -> AsyncGenerator[MediaItem, None]:
+        """Retrieve library radio stations from the provider."""
+        return
+        yield  # pragma: no cover
+
+    async def get_item(self, media_type: MediaType, item_id: str) -> MediaItem:
+        """Get single media item by id."""
+        if media_type == MediaType.PLUGIN_SOURCE and item_id == self.instance_id:
+            return PluginSourceMediaItem(
+                item_id=self.instance_id,
+                provider=self.instance_id,
+                name="Bluetooth Audio Input",
+                provider_mappings={
+                    self.instance_id: self.instance_id
+                },
+                custom_data={"source_id": self.instance_id}
+            )
+        
+        raise MediaItemNotFoundError(f"Item {item_id} not found")
