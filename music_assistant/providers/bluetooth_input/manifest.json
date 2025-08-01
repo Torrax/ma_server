@@ -1,5 +1,5 @@
 {
-  "type": "plugin",
+  "type": "music",
   "domain": "bluetooth_input",
   "stage": "beta",
   "name": "Bluetooth Audio Input",
