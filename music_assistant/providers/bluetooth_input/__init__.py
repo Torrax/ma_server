@@ -148,6 +148,8 @@ class BluetoothInputProvider(PluginProvider):
             stream_type=StreamType.CUSTOM,
         )
         
+        self.logger.info("Created Bluetooth Audio Input source: %s", self._plugin_source.name)
+        
         # Auto-start capturing if configured
         if self.config.get_value(CONF_AUTO_START):
             await self._start_capture()
@@ -165,18 +167,32 @@ class BluetoothInputProvider(PluginProvider):
 
     async def get_audio_stream(self, player_id: str) -> AsyncGenerator[bytes, None]:
         """Return the audio stream for the Bluetooth input."""
+        self.logger.info("Audio stream requested for player: %s", player_id)
+        
         # Start capturing if not already started
         if not self._is_capturing:
+            self.logger.info("Starting capture for audio stream request")
             await self._start_capture()
         
         # Stream audio data from the capture process with minimal buffering
         if self._capture_process and not self._capture_process.closed:
+            self.logger.info("Starting audio stream from capture process")
             # Use iter_chunked with small chunks for real-time streaming
             chunk_size = 4096  # Small chunks for real-time streaming
-            async for chunk in self._capture_process.iter_chunked(chunk_size):
-                yield chunk
+            chunk_count = 0
+            try:
+                async for chunk in self._capture_process.iter_chunked(chunk_size):
+                    chunk_count += 1
+                    if chunk_count % 100 == 0:  # Log every 100 chunks
+                        self.logger.debug("Streamed %d chunks (%d bytes each)", chunk_count, len(chunk))
+                    yield chunk
+            except Exception as err:
+                self.logger.error("Error in audio stream: %s", err)
+                raise
         else:
-            raise ProviderUnavailableError("Audio capture process not available")
+            error_msg = f"Audio capture process not available - capturing: {self._is_capturing}, process: {self._capture_process}"
+            self.logger.error(error_msg)
+            raise ProviderUnavailableError(error_msg)
 
     async def _start_capture(self) -> None:
         """Start audio capture from the configured input device."""
