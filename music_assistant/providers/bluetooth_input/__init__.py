@@ -21,7 +21,7 @@ from music_assistant_models.enums import (
     ProviderFeature,
     StreamType,
 )
-from music_assistant_models.errors import MediaItemNotFoundError, ProviderUnavailableError
+from music_assistant_models.errors import MediaNotFoundError, ProviderUnavailableError
 from music_assistant_models.media_items import AudioFormat, PluginSourceMediaItem
 from music_assistant.helpers.process import AsyncProcess
 from music_assistant.models.music_provider import MusicProvider
@@ -365,4 +365,4 @@ class BluetoothInputProvider(PluginProvider, MusicProvider):
                 custom_data={"source_id": self.instance_id}
             )
         
-        raise MediaItemNotFoundError(f"Item {item_id} not found")
+        raise MediaNotFoundError(f"Item {item_id} not found")
