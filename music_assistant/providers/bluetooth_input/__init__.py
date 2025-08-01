@@ -2,14 +2,12 @@
 Bluetooth Input Provider for Music Assistant.
 
 This provider allows capturing audio from a locally connected Bluetooth receiver
-and streaming it through the Music Assistant system using FFmpeg.
+and streaming it through the Music Assistant system as a Plugin Source for real-time audio.
 """
 
 from __future__ import annotations
 
 import asyncio
-import subprocess
-import time
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING
 
@@ -17,26 +15,13 @@ from music_assistant_models.config_entries import ConfigEntry, ConfigValueType, 
 from music_assistant_models.enums import (
     ConfigEntryType,
     ContentType,
-    ImageType,
-    MediaType,
     ProviderFeature,
     StreamType,
-    VolumeNormalizationMode,
 )
-from music_assistant_models.errors import MediaNotFoundError, ProviderUnavailableError
-from music_assistant_models.media_items import (
-    AudioFormat,
-    MediaItemImage,
-    MediaItemMetadata,
-    ProviderMapping,
-    Radio,
-    UniqueList,
-)
-from music_assistant_models.streamdetails import StreamDetails
-
+from music_assistant_models.errors import ProviderUnavailableError
+from music_assistant_models.media_items import AudioFormat
 from music_assistant.helpers.process import AsyncProcess
-from music_assistant.models.music_provider import MusicProvider
-from music_assistant.models.plugin import PluginProvider
+from music_assistant.models.plugin import PluginProvider, PluginSource
 
 if TYPE_CHECKING:
     from music_assistant_models.provider import ProviderManifest
@@ -116,77 +101,14 @@ async def get_config_entries(
             type=ConfigEntryType.BOOLEAN,
             label="Auto Start",
             description="Automatically start capturing when provider loads",
-            default_value=False,
+            default_value=True,
             required=False,
         ),
     )
 
 
-async def _get_audio_devices() -> list[str]:
-    """Get list of available audio input devices."""
-    devices = ["default"]
-    
-    try:
-        # Try to get audio devices using arecord (part of alsa-utils)
-        proc = await asyncio.create_subprocess_exec(
-            "arecord", "-l",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await proc.communicate()
-        
-        if proc.returncode == 0 and stdout:
-            # Parse arecord output for capture devices
-            output = stdout.decode()
-            lines = output.split('\n')
-            
-            for line in lines:
-                if 'card' in line and 'device' in line:
-                    # Example: "card 1: USB [USB Audio], device 0: USB Audio [USB Audio]"
-                    try:
-                        # Extract card number and name
-                        card_part = line.split('card ')[1]
-                        card_num = card_part.split(':')[0].strip()
-                        
-                        # Extract device number
-                        device_part = line.split('device ')[1]
-                        device_num = device_part.split(':')[0].strip()
-                        
-                        device_id = f"hw:{card_num},{device_num}"
-                        if device_id not in devices:
-                            devices.append(device_id)
-                        
-                        # Also add simplified hw:card format
-                        simple_device_id = f"hw:{card_num}"
-                        if simple_device_id not in devices:
-                            devices.append(simple_device_id)
-                            
-                    except (IndexError, ValueError):
-                        continue
-                                
-    except Exception:
-        # Fallback to common device names if detection fails
-        pass
-    
-    # Add common fallback devices
-    fallback_devices = [
-        "hw:0",
-        "hw:1", 
-        "hw:2",
-        "pulse",
-        "plughw:0",
-        "plughw:1",
-    ]
-    
-    for device_id in fallback_devices:
-        if device_id not in devices:
-            devices.append(device_id)
-    
-    return devices
-
-
-class BluetoothInputProvider(MusicProvider):
-    """Provider for capturing audio from Bluetooth input devices."""
+class BluetoothInputProvider(PluginProvider):
+    """Provider for capturing audio from Bluetooth input devices as a Plugin Source."""
 
     def __init__(self, mass: MusicAssistant, manifest: ProviderManifest, config: ProviderConfig):
         """Initialize the provider."""
@@ -194,24 +116,37 @@ class BluetoothInputProvider(MusicProvider):
         self._capture_process: AsyncProcess | None = None
         self._is_capturing = False
         self._capture_task: asyncio.Task | None = None
-        self._audio_ready_event = asyncio.Event()
+        self._plugin_source: PluginSource | None = None
 
     @property
     def supported_features(self) -> set[ProviderFeature]:
         """Return the features supported by this Provider."""
         return {
-            ProviderFeature.BROWSE,
-            ProviderFeature.LIBRARY_RADIOS,
+            ProviderFeature.AUDIO_SOURCE,
         }
-
-    @property
-    def is_streaming_provider(self) -> bool:
-        """Return True if the provider is a streaming provider."""
-        return False
 
     async def loaded_in_mass(self) -> None:
         """Call after the provider has been loaded."""
         await super().loaded_in_mass()
+        
+        # Create the plugin source
+        sample_rate = self.config.get_value(CONF_SAMPLE_RATE)
+        channels = self.config.get_value(CONF_CHANNELS)
+        
+        self._plugin_source = PluginSource(
+            id=self.instance_id,
+            name="Bluetooth Audio Input",
+            passive=False,
+            can_play_pause=False,
+            can_seek=False,
+            audio_format=AudioFormat(
+                content_type=ContentType.PCM_S16LE,
+                sample_rate=sample_rate,
+                bit_depth=DEFAULT_BIT_DEPTH,
+                channels=channels,
+            ),
+            stream_type=StreamType.CUSTOM,
+        )
         
         # Auto-start capturing if configured
         if self.config.get_value(CONF_AUTO_START):
@@ -222,104 +157,21 @@ class BluetoothInputProvider(MusicProvider):
         await self._stop_capture()
         await super().unload(is_removed)
 
-    async def get_library_radios(self) -> AsyncGenerator[Radio, None]:
-        """Retrieve library/subscribed radio stations from the provider."""
-        # Return the Bluetooth input as a radio station
-        yield Radio(
-            item_id=BLUETOOTH_INPUT_ID,
-            provider=self.instance_id,
-            name="Bluetooth Audio Input",
-            provider_mappings={
-                ProviderMapping(
-                    item_id=BLUETOOTH_INPUT_ID,
-                    provider_domain=self.domain,
-                    provider_instance=self.instance_id,
-                    available=True,
-                    audio_format=AudioFormat(
-                        content_type=ContentType.PCM_S16LE,
-                        sample_rate=self.config.get_value(CONF_SAMPLE_RATE),
-                        bit_depth=DEFAULT_BIT_DEPTH,
-                        channels=self.config.get_value(CONF_CHANNELS),
-                    ),
-                )
-            },
-            metadata=MediaItemMetadata(
-                description="Live audio input from Bluetooth receiver",
-                images=UniqueList([
-                    MediaItemImage(
-                        type=ImageType.THUMB,
-                        path="icon.svg",
-                        provider=self.domain,
-                        remotely_accessible=False,
-                    )
-                ]),
-            ),
-        )
+    def get_source(self) -> PluginSource:
+        """Return the plugin source."""
+        if not self._plugin_source:
+            raise ProviderUnavailableError("Plugin source not initialized")
+        return self._plugin_source
 
-    async def get_radio(self, prov_radio_id: str) -> Radio:
-        """Get full radio details by id."""
-        if prov_radio_id != BLUETOOTH_INPUT_ID:
-            raise MediaNotFoundError(f"Radio {prov_radio_id} not found")
-        
-        # Return the radio from the library
-        async for radio in self.get_library_radios():
-            if radio.item_id == prov_radio_id:
-                return radio
-        
-        raise MediaNotFoundError(f"Radio {prov_radio_id} not found")
-
-    async def get_stream_details(self, item_id: str, media_type: MediaType) -> StreamDetails:
-        """Get streamdetails for a track/radio."""
-        if item_id != BLUETOOTH_INPUT_ID:
-            raise MediaNotFoundError(f"Item {item_id} not found")
-        
-        sample_rate = self.config.get_value(CONF_SAMPLE_RATE)
-        channels = self.config.get_value(CONF_CHANNELS)
-        
-        # Create streamdetails that bypass all MA processing for minimal latency
-        streamdetails = StreamDetails(
-            provider=self.instance_id,
-            item_id=item_id,
-            audio_format=AudioFormat(
-                content_type=ContentType.PCM_S16LE,
-                sample_rate=sample_rate,
-                bit_depth=DEFAULT_BIT_DEPTH,
-                channels=channels,
-            ),
-            media_type=MediaType.RADIO,
-            stream_type=StreamType.CUSTOM,
-            can_seek=False,
-            allow_seek=False,
-            # Disable all processing that could add delay
-            enable_cache=False,
-            strip_silence_begin=False,
-            strip_silence_end=False,
-            # Disable volume normalization to prevent analysis delays
-            volume_normalization_mode=VolumeNormalizationMode.DISABLED,
-            target_loudness=None,
-            loudness=None,
-        )
-        
-        # Pre-start capture to eliminate startup delay
-        if not self._is_capturing:
-            await self._start_capture()
-        
-        return streamdetails
-
-    async def get_audio_stream(
-        self, streamdetails: StreamDetails, seek_position: int = 0
-    ) -> AsyncGenerator[bytes, None]:
+    async def get_audio_stream(self, player_id: str) -> AsyncGenerator[bytes, None]:
         """Return the audio stream for the Bluetooth input."""
-        if streamdetails.item_id != BLUETOOTH_INPUT_ID:
-            raise MediaNotFoundError(f"Item {streamdetails.item_id} not found")
-        
         # Start capturing if not already started
         if not self._is_capturing:
             await self._start_capture()
         
         # Stream audio data from the capture process with minimal buffering
         if self._capture_process and not self._capture_process.closed:
-            # Use iter_chunked with small chunks for lower latency
+            # Use iter_chunked with small chunks for real-time streaming
             chunk_size = 4096  # Small chunks for real-time streaming
             async for chunk in self._capture_process.iter_chunked(chunk_size):
                 yield chunk
@@ -353,7 +205,7 @@ class BluetoothInputProvider(MusicProvider):
         ]
         
         try:
-            self.logger.info("Starting audio capture from device: %s", device)
+            self.logger.info("Starting real-time audio capture from device: %s", device)
             self._capture_process = AsyncProcess(
                 command,
                 stdin=False,
@@ -428,12 +280,3 @@ class BluetoothInputProvider(MusicProvider):
             except Exception as err:
                 self.logger.error("Error in capture monitor: %s", err)
                 await asyncio.sleep(5)
-
-    async def resolve_image(self, path: str) -> str | bytes:
-        """Resolve an image from an image path."""
-        if path == "icon.svg":
-            # Return a simple SVG icon for Bluetooth
-            return '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M17.71,7.71L12,2H11V9.59L6.41,5L5,6.41L10.59,12L5,17.59L6.41,19L11,14.41V22H12L17.71,16.29L13.41,12L17.71,7.71M13,5.83L15.17,8L13,10.17V5.83M13,13.83L15.17,16L13,18.17V13.83Z" />
-            </svg>'''
-        return path
