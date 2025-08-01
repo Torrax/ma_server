@@ -276,7 +276,8 @@ class BluetoothInputProvider(MusicProvider):
         sample_rate = self.config.get_value(CONF_SAMPLE_RATE)
         channels = self.config.get_value(CONF_CHANNELS)
         
-        return StreamDetails(
+        # Create streamdetails that bypass all MA processing for minimal latency
+        streamdetails = StreamDetails(
             provider=self.instance_id,
             item_id=item_id,
             audio_format=AudioFormat(
@@ -289,7 +290,21 @@ class BluetoothInputProvider(MusicProvider):
             stream_type=StreamType.CUSTOM,
             can_seek=False,
             allow_seek=False,
+            # Disable all processing that could add delay
+            enable_cache=False,
+            strip_silence_begin=False,
+            strip_silence_end=False,
+            # Disable volume normalization to prevent analysis delays
+            volume_normalization_mode=VolumeNormalizationMode.DISABLED,
+            target_loudness=None,
+            loudness=None,
         )
+        
+        # Pre-start capture to eliminate startup delay
+        if not self._is_capturing:
+            await self._start_capture()
+        
+        return streamdetails
 
     async def get_audio_stream(
         self, streamdetails: StreamDetails, seek_position: int = 0
