@@ -316,26 +316,18 @@ class BluetoothInputProvider(MusicProvider):
         channels = self.config.get_value(CONF_CHANNELS)
         buffer_size = self.config.get_value(CONF_BUFFER_SIZE)
         
-        # Build FFmpeg command for audio capture with better error handling
-        ffmpeg_args = [
-            "ffmpeg",
-            "-y",  # Overwrite output files without asking
-            "-f", "alsa",  # Use ALSA input format
-            "-thread_queue_size", "1024",  # Increase thread queue size
-            "-i", device,  # Input device
-            "-ar", str(sample_rate),  # Sample rate
-            "-ac", str(channels),  # Number of channels
-            "-acodec", "pcm_s16le",  # Output codec
-            "-f", "s16le",  # Output format
-            "-avoid_negative_ts", "make_zero",  # Handle timing issues
-            "-fflags", "+genpts",  # Generate presentation timestamps
-            "-"  # Output to stdout
-        ]
+        # Use arecord piped to ffmpeg since FFmpeg doesn't have ALSA support in this container
+        # Build the piped command: arecord | ffmpeg
+        command = (
+            f"arecord -D {device} -f S16_LE -r {sample_rate} -c {channels} -t raw | "
+            f"ffmpeg -f s16le -ar {sample_rate} -ac {channels} -i - "
+            f"-acodec pcm_s16le -f s16le -"
+        )
         
         try:
-            self.logger.info("Starting FFmpeg with command: %s", " ".join(ffmpeg_args))
+            self.logger.info("Starting audio capture with command: %s", command)
             self._capture_process = AsyncProcess(
-                ffmpeg_args,
+                ["sh", "-c", command],
                 stdin=False,
                 stdout=True,
                 stderr=True,
