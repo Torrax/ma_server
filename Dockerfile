@@ -3,7 +3,7 @@
 # Builder image. It builds the venv that will be copied to the final image
 #
 ARG BASE_IMAGE_VERSION=latest
-FROM ghcr.io/music-assistant/base:$BASE_IMAGE_VERSION AS builder
+FROM music-assistant-base:$BASE_IMAGE_VERSION AS builder
 
 ADD dist dist
 COPY requirements_all.txt .
@@ -38,7 +38,7 @@ RUN chmod -R 777 /app
 
 # FINAL docker image for music assistant server
 
-FROM ghcr.io/music-assistant/base:$BASE_IMAGE_VERSION
+FROM music-assistant-base:$BASE_IMAGE_VERSION
 
 ENV VIRTUAL_ENV=/app/venv
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"

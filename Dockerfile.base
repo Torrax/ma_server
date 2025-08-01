@@ -18,15 +18,26 @@ RUN set -x \
         # openssl-dev is needed for airplay
         openssl-dev  \
         # install snapcast so the snapcast provider can run the builtin snapcast server
-        snapcast
+        snapcast \
+    # Audio capture dependencies for Bluetooth input provider
+        alsa-utils \
+        alsa-lib \
+        alsa-lib-dev \
+        # PulseAudio support (alternative to ALSA)
+        pulseaudio \
+        pulseaudio-alsa \
+        # Bluetooth support
+        bluez \
+        bluez-alsa \
+        # Additional audio tools
+        sox
 
 # Get static ffmpeg builds from https://hub.docker.com/r/mwader/static-ffmpeg/
 COPY --from=mwader/static-ffmpeg:7.1.1 /ffmpeg /usr/local/bin/
 COPY --from=mwader/static-ffmpeg:7.1.1 /ffprobe /usr/local/bin/
 
-# Copy widevine client files to container
+# Create widevine directory (for compatibility)
 RUN mkdir -p /usr/local/bin/widevine_cdm
-COPY widevine_cdm/* /usr/local/bin/widevine_cdm/
 
 # JEMalloc for more efficient memory management
 ENV LD_PRELOAD="/usr/lib/libjemalloc.so.2"
