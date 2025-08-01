@@ -76,8 +76,19 @@ async def get_config_entries(
     action: [optional] action key called from config entries UI.
     values: the (intermediate) raw values for config entries sent with the action.
     """
-    # Get available audio devices
-    audio_devices = await _get_audio_devices()
+    # Use static list of common audio devices
+    audio_devices = [
+        "default",
+        "hw:0",
+        "hw:1", 
+        "hw:2",
+        "hw:3",
+        "hw:4",
+        "pulse",
+        "plughw:0",
+        "plughw:1",
+        "plughw:2",
+    ]
     
     return (
         ConfigEntry(
