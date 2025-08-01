@@ -138,8 +138,8 @@ class BluetoothInputProvider(PluginProvider):
         self._plugin_source = PluginSource(
             id=self.instance_id,
             name="Bluetooth Audio Input (Live Stream)",
-            passive=False,  # Keep selectable but optimize for live streaming
-            can_play_pause=False,  # Can't pause live audio
+            passive=False,  # Keep selectable and playable
+            can_play_pause=True,  # Allow play to start, but ignore pause commands
             can_seek=False,  # Can't seek live audio
             audio_format=AudioFormat(
                 content_type=ContentType.PCM_S16LE,
