@@ -135,14 +135,10 @@ class BluetoothInputProvider(PluginProvider):
         sample_rate = self.config.get_value(CONF_SAMPLE_RATE)
         channels = self.config.get_value(CONF_CHANNELS)
         
-        # Create a named pipe for real-time audio streaming
-        import tempfile
-        self._named_pipe = os.path.join(tempfile.gettempdir(), f"bluetooth_input_{self.instance_id}")
-        
         self._plugin_source = PluginSource(
             id=self.instance_id,
-            name="Bluetooth Audio Input",
-            passive=False,
+            name="Bluetooth Audio Input (Live Stream)",
+            passive=True,  # Set to passive - this is a live stream, not controllable media
             can_play_pause=False,
             can_seek=False,
             audio_format=AudioFormat(
@@ -151,8 +147,7 @@ class BluetoothInputProvider(PluginProvider):
                 bit_depth=DEFAULT_BIT_DEPTH,
                 channels=channels,
             ),
-            stream_type=StreamType.NAMED_PIPE,
-            path=self._named_pipe,
+            stream_type=StreamType.CUSTOM,
         )
         
         self.logger.info("Created Bluetooth Audio Input source: %s", self._plugin_source.name)
@@ -172,6 +167,35 @@ class BluetoothInputProvider(PluginProvider):
             raise ProviderUnavailableError("Plugin source not initialized")
         return self._plugin_source
 
+    async def get_audio_stream(self, player_id: str) -> AsyncGenerator[bytes, None]:
+        """Return the audio stream for the Bluetooth input with ultra-low latency."""
+        self.logger.info("Live audio stream requested for player: %s", player_id)
+        
+        # Start capturing if not already started
+        if not self._is_capturing:
+            self.logger.info("Starting capture for live audio stream request")
+            await self._start_capture()
+        
+        # Stream audio data from the capture process with ultra-minimal buffering
+        if self._capture_process and not self._capture_process.closed:
+            self.logger.info("Starting live audio stream from capture process")
+            # Use tiny chunks for absolute minimal latency - this is LIVE streaming!
+            chunk_size = 1024  # Ultra-small chunks for real-time streaming
+            chunk_count = 0
+            try:
+                async for chunk in self._capture_process.iter_chunked(chunk_size):
+                    chunk_count += 1
+                    if chunk_count % 1000 == 0:  # Log every 1000 chunks
+                        self.logger.debug("Streamed %d live chunks (%d bytes each)", chunk_count, len(chunk))
+                    yield chunk
+            except Exception as err:
+                self.logger.error("Error in live audio stream: %s", err)
+                raise
+        else:
+            error_msg = f"Live audio capture process not available - capturing: {self._is_capturing}, process: {self._capture_process}"
+            self.logger.error(error_msg)
+            raise ProviderUnavailableError(error_msg)
+
 
     async def _start_capture(self) -> None:
         """Start audio capture from the configured input device."""
@@ -183,17 +207,12 @@ class BluetoothInputProvider(PluginProvider):
         channels = self.config.get_value(CONF_CHANNELS)
         buffer_size = self.config.get_value(CONF_BUFFER_SIZE)
         
-        # Calculate period size for low latency (buffer_size in ms to samples)
-        period_size = max(64, int(sample_rate * buffer_size / 1000))
+        # Calculate period size for ultra-low latency (buffer_size in ms to samples)
+        period_size = max(32, int(sample_rate * buffer_size / 1000))
         
         try:
-            # Create named pipe if it doesn't exist
-            if os.path.exists(self._named_pipe):
-                os.remove(self._named_pipe)
-            os.mkfifo(self._named_pipe)
-            
-            # Use direct arecord for minimal latency - output directly to named pipe
-            # This eliminates the FFmpeg processing delay entirely
+            # Use direct arecord with minimal buffering for real-time streaming
+            # Output to stdout for immediate processing by get_audio_stream
             command = [
                 "arecord",
                 "-D", device,
@@ -201,21 +220,20 @@ class BluetoothInputProvider(PluginProvider):
                 "-r", str(sample_rate),
                 "-c", str(channels),
                 "-t", "raw",
-                "--buffer-size", str(period_size * 2),  # Minimal buffer for lowest latency
-                "--period-size", str(period_size),
-                self._named_pipe,  # Output directly to named pipe
+                "--buffer-size", str(period_size),  # Ultra-minimal buffer
+                "--period-size", str(period_size // 2),  # Even smaller periods
             ]
             
-            self.logger.info("Starting real-time audio capture from device: %s to pipe: %s", device, self._named_pipe)
+            self.logger.info("Starting ultra-low latency audio capture from device: %s", device)
             self._capture_process = AsyncProcess(
                 command,
                 stdin=False,
-                stdout=False,  # No stdout since we're writing to named pipe
+                stdout=True,  # Stream to stdout for immediate processing
                 stderr=True,
             )
             await self._capture_process.start()
             self._is_capturing = True
-            self.logger.info("Started real-time audio capture from device: %s", device)
+            self.logger.info("Started ultra-low latency audio capture from device: %s", device)
             
             # Start monitoring task
             self._capture_task = asyncio.create_task(self._monitor_capture())
@@ -241,13 +259,6 @@ class BluetoothInputProvider(PluginProvider):
             await self._capture_process.close()
             self._capture_process = None
         
-        # Clean up named pipe
-        if hasattr(self, '_named_pipe') and os.path.exists(self._named_pipe):
-            try:
-                os.remove(self._named_pipe)
-                self.logger.debug("Removed named pipe: %s", self._named_pipe)
-            except Exception as err:
-                self.logger.warning("Failed to remove named pipe: %s", err)
         
         self.logger.info("Stopped audio capture")
 
