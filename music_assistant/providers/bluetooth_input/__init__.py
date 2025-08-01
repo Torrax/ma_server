@@ -322,36 +322,50 @@ class BluetoothInputProvider(MusicProvider):
         # Calculate period size for low latency (buffer_size in ms to samples)
         period_size = max(64, int(sample_rate * buffer_size / 1000))
         
-        # Use direct FFmpeg capture with optimized real-time settings
-        # This eliminates the arecord pipe which adds latency
-        command = [
+        # Use optimized arecord with minimal buffering piped to ffmpeg
+        # This approach is more reliable than direct FFmpeg ALSA capture
+        arecord_cmd = [
+            "arecord",
+            "-D", device,
+            "-f", "S16_LE",
+            "-r", str(sample_rate),
+            "-c", str(channels),
+            "-t", "raw",
+            "--buffer-size", str(period_size * 4),  # Small buffer for low latency
+            "--period-size", str(period_size),
+        ]
+        
+        ffmpeg_cmd = [
             "ffmpeg",
             "-hide_banner",
             "-loglevel", "error",
-            # Input settings - direct ALSA capture
-            "-f", "alsa",
-            "-channels", str(channels),
-            "-sample_rate", str(sample_rate),
-            "-i", device,
+            # Input from stdin (arecord output)
+            "-f", "s16le",
+            "-ar", str(sample_rate),
+            "-ac", str(channels),
+            "-i", "-",
             # Real-time optimizations
             "-fflags", "+nobuffer+flush_packets",
             "-flags", "+low_delay",
             "-probesize", "32",
             "-analyzeduration", "0",
-            "-thread_queue_size", "1024",
-            # Output format - raw PCM for minimal processing
+            # Output format - raw PCM
             "-acodec", "pcm_s16le",
             "-f", "s16le",
-            "-ac", str(channels),
-            "-ar", str(sample_rate),
             # Output to stdout
             "-"
         ]
         
+        # Combine commands with pipe
+        command = " | ".join([
+            " ".join(f'"{arg}"' if " " in arg else arg for arg in arecord_cmd),
+            " ".join(f'"{arg}"' if " " in arg else arg for arg in ffmpeg_cmd)
+        ])
+        
         try:
             self.logger.info("Starting audio capture from device: %s", device)
             self._capture_process = AsyncProcess(
-                command,
+                ["sh", "-c", command],
                 stdin=False,
                 stdout=True,
                 stderr=True,
