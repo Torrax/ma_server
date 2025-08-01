@@ -317,11 +317,11 @@ class BluetoothInputProvider(MusicProvider):
         buffer_size = self.config.get_value(CONF_BUFFER_SIZE)
         
         # Use arecord piped to ffmpeg since FFmpeg doesn't have ALSA support in this container
-        # Build the piped command: arecord | ffmpeg
+        # Build the piped command with low-latency optimizations
         command = (
-            f"arecord -D {device} -f S16_LE -r {sample_rate} -c {channels} -t raw | "
+            f"arecord -D {device} -f S16_LE -r {sample_rate} -c {channels} -t raw --buffer-size={buffer_size * sample_rate // 1000} | "
             f"ffmpeg -f s16le -ar {sample_rate} -ac {channels} -i - "
-            f"-acodec pcm_s16le -f s16le -"
+            f"-acodec pcm_s16le -f s16le -flush_packets 1 -fflags +nobuffer -flags +low_delay -"
         )
         
         try:
