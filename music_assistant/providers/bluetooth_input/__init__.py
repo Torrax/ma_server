@@ -122,7 +122,6 @@ async def get_config_entries(
             label="Buffer Size",
             description="Audio buffer size in milliseconds",
             default_value=100,
-            range=(50, 1000),
         ),
         ConfigEntry(
             key=CONF_AUTO_START,
