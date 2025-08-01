@@ -64,10 +64,10 @@ async def setup(
 
 
 async def get_config_entries(
-    mass: MusicAssistant,
-    instance_id: str | None = None,
-    action: str | None = None,
-    values: dict[str, ConfigValueType] | None = None,
+    mass: MusicAssistant,  # noqa: ARG001
+    instance_id: str | None = None,  # noqa: ARG001
+    action: str | None = None,  # noqa: ARG001
+    values: dict[str, ConfigValueType] | None = None,  # noqa: ARG001
 ) -> tuple[ConfigEntry, ...]:
     """
     Return Config entries to setup this provider.
@@ -76,20 +76,6 @@ async def get_config_entries(
     action: [optional] action key called from config entries UI.
     values: the (intermediate) raw values for config entries sent with the action.
     """
-    # Use static list of common audio devices
-    audio_devices = [
-        "default",
-        "hw:0",
-        "hw:1", 
-        "hw:2",
-        "hw:3",
-        "hw:4",
-        "pulse",
-        "plughw:0",
-        "plughw:1",
-        "plughw:2",
-    ]
-    
     return (
         ConfigEntry(
             key=CONF_AUDIO_DEVICE,
@@ -97,7 +83,6 @@ async def get_config_entries(
             label="Audio Input Device",
             description="The audio input device to capture from (e.g., Bluetooth receiver)",
             default_value="default",
-            options=audio_devices,
             required=True,
         ),
         ConfigEntry(
@@ -106,7 +91,7 @@ async def get_config_entries(
             label="Sample Rate",
             description="Audio sample rate in Hz",
             default_value=DEFAULT_SAMPLE_RATE,
-            options=[8000, 16000, 22050, 44100, 48000, 96000],
+            required=False,
         ),
         ConfigEntry(
             key=CONF_CHANNELS,
@@ -114,7 +99,7 @@ async def get_config_entries(
             label="Channels",
             description="Number of audio channels",
             default_value=DEFAULT_CHANNELS,
-            options=[1, 2],
+            required=False,
         ),
         ConfigEntry(
             key=CONF_BUFFER_SIZE,
@@ -122,6 +107,7 @@ async def get_config_entries(
             label="Buffer Size",
             description="Audio buffer size in milliseconds",
             default_value=100,
+            required=False,
         ),
         ConfigEntry(
             key=CONF_AUTO_START,
@@ -129,6 +115,7 @@ async def get_config_entries(
             label="Auto Start",
             description="Automatically start capturing when provider loads",
             default_value=False,
+            required=False,
         ),
     )
 
