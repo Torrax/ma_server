@@ -316,20 +316,24 @@ class BluetoothInputProvider(MusicProvider):
         channels = self.config.get_value(CONF_CHANNELS)
         buffer_size = self.config.get_value(CONF_BUFFER_SIZE)
         
-        # Build FFmpeg command for audio capture
+        # Build FFmpeg command for audio capture with better error handling
         ffmpeg_args = [
             "ffmpeg",
+            "-y",  # Overwrite output files without asking
             "-f", "alsa",  # Use ALSA input format
+            "-thread_queue_size", "1024",  # Increase thread queue size
             "-i", device,  # Input device
             "-ar", str(sample_rate),  # Sample rate
             "-ac", str(channels),  # Number of channels
             "-acodec", "pcm_s16le",  # Output codec
             "-f", "s16le",  # Output format
-            "-buffer_size", str(buffer_size * 1000),  # Buffer size in microseconds
+            "-avoid_negative_ts", "make_zero",  # Handle timing issues
+            "-fflags", "+genpts",  # Generate presentation timestamps
             "-"  # Output to stdout
         ]
         
         try:
+            self.logger.info("Starting FFmpeg with command: %s", " ".join(ffmpeg_args))
             self._capture_process = AsyncProcess(
                 ffmpeg_args,
                 stdin=False,
@@ -368,14 +372,34 @@ class BluetoothInputProvider(MusicProvider):
 
     async def _monitor_capture(self) -> None:
         """Monitor the capture process and restart if needed."""
+        restart_count = 0
+        max_restarts = 3
+        
         while self._is_capturing and self._capture_process:
             try:
                 # Check if process is still running
                 if self._capture_process.closed or self._capture_process.returncode is not None:
-                    self.logger.warning("Capture process died, attempting restart...")
+                    if restart_count >= max_restarts:
+                        self.logger.error("FFmpeg process died too many times (%d), stopping capture", restart_count)
+                        # Log stderr for debugging
+                        if self._capture_process and hasattr(self._capture_process, 'stderr'):
+                            try:
+                                stderr_data = await self._capture_process.stderr.read()
+                                if stderr_data:
+                                    self.logger.error("FFmpeg stderr: %s", stderr_data.decode())
+                            except Exception:
+                                pass
+                        await self._stop_capture()
+                        break
+                    
+                    restart_count += 1
+                    self.logger.warning("Capture process died (attempt %d/%d), attempting restart...", restart_count, max_restarts)
                     await self._stop_capture()
-                    await asyncio.sleep(1)  # Brief delay before restart
+                    await asyncio.sleep(2)  # Longer delay before restart
                     await self._start_capture()
+                else:
+                    # Process is running, reset restart count
+                    restart_count = 0
                 
                 await asyncio.sleep(5)  # Check every 5 seconds
                 
