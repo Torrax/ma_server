@@ -405,9 +405,11 @@ class BluetoothInputProvider(MusicProvider):
 
     async def resolve_image(self, path: str) -> str | bytes:
         """Resolve an image from an image path."""
-        if path == "icon.svg":
-            # Return a simple SVG icon for Bluetooth
-            return '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M17.71,7.71L12,2H11V9.59L6.41,5L5,6.41L10.59,12L5,17.59L6.41,19L11,14.41V22H12L17.71,16.29L13.41,12L17.71,7.71M13,5.83L15.17,8L13,10.17V5.83M13,13.83L15.17,16L13,18.17V13.83Z" />
-            </svg>'''
+        if path in ("icon.svg", "icon_monochrome.svg"):
+            # Return the path to the actual icon file in our provider directory
+            import os
+            provider_dir = os.path.dirname(__file__)
+            icon_path = os.path.join(provider_dir, path)
+            if os.path.exists(icon_path):
+                return icon_path
         return path
