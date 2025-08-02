@@ -90,7 +90,7 @@ async def get_config_entries(
             key=CONF_AUDIO_DEVICE,
             type=ConfigEntryType.STRING,
             label="Audio Input Device",
-            description="The audio input device to capture from (e.g., Bluetooth receiver)",
+            description="The audio input device to capture from. Available devices: hw:1,0 (USB Audio), hw:2,0 (ALC897 Analog), hw:2,2 (ALC897 Alt), hw:3,0 (DMIC), default, pulse",
             default_value="default",
             required=True,
         ),
@@ -230,8 +230,10 @@ class LocalAudioSourceProvider(MusicProvider):
 
     async def get_library_radios(self) -> AsyncGenerator[Radio, None]:
         """Retrieve library/subscribed radio stations from the provider."""
-        # Get the custom name from config
-        custom_name = self.config.get_value(CONF_CUSTOM_NAME) or "Local Audio Source"
+        # Get the custom name from config, fallback to manifest name
+        custom_name = self.config.get_value(CONF_CUSTOM_NAME)
+        if not custom_name or custom_name.strip() == "":
+            custom_name = "Local Audio Source"
         
         # Return the local audio input as a radio station
         yield Radio(
