@@ -1,11 +1,40 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 25 25" version="1.1">
-<g id="surface1">
-<path style=" stroke:none;fill-rule:nonzero;fill:rgb(0%,0%,0%);fill-opacity:1;" d="M 1.5 0 L 23.5 0 C 24.328125 0 25 0.671875 25 1.5 L 25 23.5 C 25 24.328125 24.328125 25 23.5 25 L 1.5 25 C 0.671875 25 0 24.328125 0 23.5 L 0 1.5 C 0 0.671875 0.671875 0 1.5 0 Z M 1.5 0 "/>
-<path style=" stroke:none;fill-rule:nonzero;fill:rgb(100%,100%,100%);fill-opacity:1;" d="M 10.386719 18.875 L 14.8125 7.125 L 16.113281 7.125 L 11.6875 18.875 Z M 10.386719 18.875 "/>
-<path style=" stroke:none;fill-rule:nonzero;fill:rgb(100%,100%,100%);fill-opacity:1;" d="M 21.371094 18.875 L 16.945312 7.125 L 18.246094 7.125 L 22.671875 18.875 Z M 21.371094 18.875 "/>
-<path style=" stroke:none;fill-rule:nonzero;fill:rgb(100%,100%,100%);fill-opacity:1;" d="M 2.636719 18.875 L 2.636719 7.125 L 3.875 7.125 L 3.875 18.875 Z M 2.636719 18.875 "/>
-<path style=" stroke:none;fill-rule:nonzero;fill:rgb(100%,100%,100%);fill-opacity:1;" d="M 5.445312 18.875 L 5.445312 7.125 L 6.683594 7.125 L 6.683594 18.875 Z M 5.445312 18.875 "/>
-<path style=" stroke:none;fill-rule:nonzero;fill:rgb(100%,100%,100%);fill-opacity:1;" d="M 8.253906 18.875 L 8.253906 7.125 L 9.492188 7.125 L 9.492188 18.875 Z M 8.253906 18.875 "/>
-</g>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 976">
+  <!-- your template background -->
+  <rect width="640" height="976" ry="291" fill="#0a3d91"/>
+
+  <!-- compound Bluetooth “rune” with real holes via even-odd -->
+  <g transform="translate(0 168) scale(1.0666667)">
+    <path
+      d="
+        M323.750625 151.3075
+          l48.574375 48.57375
+          -48.544375 48.535
+          -0.03 -97.10875
+        z
+
+        M323.750625 448.653125
+          l48.574375 -48.564375
+          -48.544375 -48.544375
+          -0.03 97.10875
+        z
+
+        M271.888125 299.98
+          L166.8825 194.70625
+          l30.435625 -30.42625
+          L280.9675 247.96875
+          V47.4139375
+          L433.0975 199.53375
+          L332.650625 299.98
+          L433.116875 400.45625
+          L280.9775 552.57625
+          V352.01125
+          l-83.66875 83.69875
+          l-30.43625 -30.445625
+          l105.015625 -105.284375
+        z
+      "
+      fill="#FFF"
+      fill-rule="evenodd"
+    />
+  </g>
 </svg>

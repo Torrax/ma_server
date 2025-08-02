@@ -17,7 +17,7 @@ The provider supports the following configuration options:
 - **Audio Input Device**: The ALSA device to capture from (e.g., `default`, `hw:0`, `pulse`)
 - **Sample Rate**: Audio sample rate in Hz (8000, 16000, 22050, 44100, 48000, 96000)
 - **Channels**: Number of audio channels (1 for mono, 2 for stereo)
-- **Buffer Size**: Audio buffer size in milliseconds (50-1000ms)
+- **Buffer Size**: Audio buffer size in milliseconds (20-1000ms, lower = less delay)
 - **Auto Start**: Automatically start capturing when the provider loads
 
 ## Requirements
@@ -38,3 +38,15 @@ The provider supports the following configuration options:
 The provider uses FFmpeg to capture audio from ALSA devices and streams it as PCM audio through Music Assistant's streaming system. The audio is captured in real-time and can be played on any Music Assistant-compatible player.
 
 The provider implements the Music Provider interface and presents the audio input as a radio station, which allows it to be treated like any other audio source in the system.
+
+### Real-Time Optimizations
+
+The provider has been optimized for minimal latency:
+
+- **Direct FFmpeg capture**: Eliminates the arecord pipe that was adding latency
+- **Low-latency FFmpeg flags**: Uses `+nobuffer+flush_packets`, `+low_delay`, minimal probesize
+- **Small chunk streaming**: Uses 4KB chunks for immediate audio delivery
+- **Reduced default buffer**: 20ms default buffer size (down from 50ms)
+- **Real-time thread queue**: Optimized thread queue size for continuous streaming
+
+These optimizations ensure that audio playback begins immediately when the Bluetooth source starts playing, providing a near real-time streaming experience.
