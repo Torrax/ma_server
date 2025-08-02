@@ -1,8 +1,8 @@
 """
-Bluetooth Input Provider for Music Assistant.
+Local Audio Source Provider for Music Assistant.
 
-This provider allows capturing audio from a locally connected Bluetooth receiver
-and streaming it through the Music Assistant system using FFmpeg.
+This provider allows capturing audio from locally connected audio sources
+(Bluetooth, line-in, microphone, etc.) and streaming it through the Music Assistant system using FFmpeg.
 """
 
 from __future__ import annotations
@@ -49,6 +49,7 @@ DEFAULT_CHANNELS = 2
 DEFAULT_BIT_DEPTH = 16
 
 # Configuration keys
+CONF_CUSTOM_NAME = "custom_name"
 CONF_AUDIO_DEVICE = "audio_device"
 CONF_SAMPLE_RATE = "sample_rate"
 CONF_CHANNELS = "channels"
@@ -77,6 +78,14 @@ async def get_config_entries(
     values: the (intermediate) raw values for config entries sent with the action.
     """
     return (
+        ConfigEntry(
+            key=CONF_CUSTOM_NAME,
+            type=ConfigEntryType.STRING,
+            label="Custom Name",
+            description="Custom name for this audio source (e.g., 'Living Room Bluetooth', 'Turntable')",
+            default_value="Local Audio Source",
+            required=False,
+        ),
         ConfigEntry(
             key=CONF_AUDIO_DEVICE,
             type=ConfigEntryType.STRING,
@@ -184,7 +193,7 @@ async def _get_audio_devices() -> list[str]:
 
 
 class BluetoothInputProvider(MusicProvider):
-    """Provider for capturing audio from Bluetooth input devices."""
+    """Provider for capturing audio from local audio sources (Bluetooth, line-in, microphone, etc.)."""
 
     def __init__(self, mass: MusicAssistant, manifest: ProviderManifest, config: ProviderConfig):
         """Initialize the provider."""
@@ -221,11 +230,14 @@ class BluetoothInputProvider(MusicProvider):
 
     async def get_library_radios(self) -> AsyncGenerator[Radio, None]:
         """Retrieve library/subscribed radio stations from the provider."""
-        # Return the Bluetooth input as a radio station
+        # Get the custom name from config
+        custom_name = self.config.get_value(CONF_CUSTOM_NAME) or "Local Audio Source"
+        
+        # Return the local audio input as a radio station
         yield Radio(
             item_id=BLUETOOTH_INPUT_ID,
             provider=self.instance_id,
-            name="Bluetooth Audio Input",
+            name=custom_name,
             provider_mappings={
                 ProviderMapping(
                     item_id=BLUETOOTH_INPUT_ID,
@@ -241,7 +253,7 @@ class BluetoothInputProvider(MusicProvider):
                 )
             },
             metadata=MediaItemMetadata(
-                description="Live audio input from Bluetooth receiver",
+                description="Live audio input from local audio source",
                 images=UniqueList([
                     MediaItemImage(
                         type=ImageType.THUMB,
