@@ -454,16 +454,43 @@ class LocalAudioSourceProvider(MusicProvider):
         if streamdetails.item_id != AUDIO_SOURCE_ID:
             raise MediaNotFoundError(f"Item {streamdetails.item_id} not found")
         
-        # Start capturing if not already started
-        if not self._is_capturing:
-            await self._start_capture()
+        # Create a new capture process for each stream to avoid concurrency issues
+        device = self.config.get_value(CONF_AUDIO_DEVICE)
+        sample_rate = self.config.get_value(CONF_SAMPLE_RATE)
+        channels = self.config.get_value(CONF_CHANNELS)
         
-        # Stream audio data from the capture process
-        if self._capture_process and not self._capture_process.closed:
-            async for chunk in self._capture_process.iter_any():
+        # Use arecord piped to ffmpeg with low-latency real-time streaming optimizations
+        command = (
+            f"arecord -D {device} -f S16_LE -r {sample_rate} -c {channels} -t raw | "
+            f"ffmpeg -f s16le -ar {sample_rate} -ac {channels} "
+            f"-readrate 1.0 -readrate_initial_burst 0.5 "
+            f"-i - -acodec pcm_s16le -f s16le "
+            f"-fflags +nobuffer -flags +low_delay -probesize 32 -analyzeduration 0 -"
+        )
+        
+        stream_process = None
+        try:
+            self.logger.info("Starting audio stream with command: %s", command)
+            stream_process = AsyncProcess(
+                ["sh", "-c", command],
+                stdin=False,
+                stdout=True,
+                stderr=True,
+            )
+            await stream_process.start()
+            self.logger.info("Started audio stream from device: %s", device)
+            
+            # Stream audio data from this dedicated process
+            async for chunk in stream_process.iter_any():
                 yield chunk
-        else:
-            raise ProviderUnavailableError("Audio capture process not available")
+                
+        except Exception as err:
+            self.logger.error("Failed to stream audio: %s", err)
+            raise ProviderUnavailableError(f"Failed to stream audio: {err}")
+        finally:
+            if stream_process and not stream_process.closed:
+                await stream_process.close()
+                self.logger.info("Closed audio stream process")
 
     async def _start_capture(self) -> None:
         """Start audio capture from the configured input device."""
