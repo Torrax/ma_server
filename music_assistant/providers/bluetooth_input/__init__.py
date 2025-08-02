@@ -1,9 +1,8 @@
 """
-Bluetooth-Input Provider for Music Assistant
-(PulseAudio / PipeWire, ultra-low latency, no ALSA required)
+Bluetooth-Input Provider for Music Assistant (pulse/pipewire, low-latency).
 
-Capture live audio from a local Bluetooth receiver (or any Pulse/PipeWire
-source) and stream it through Music Assistant with sub-second start-up delay.
+Capture live audio from a local Bluetooth sink (or any PulseAudio / PipeWire
+source) and stream it through Music Assistant with <1 s start-up delay.
 """
 
 from __future__ import annotations
@@ -13,8 +12,6 @@ import contextlib
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING
 
-from music_assistant.helpers.process import AsyncProcess
-from music_assistant.models.music_provider import MusicProvider
 from music_assistant_models.config_entries import (
     ConfigEntry,
     ConfigValueType,
@@ -39,13 +36,16 @@ from music_assistant_models.media_items import (
 )
 from music_assistant_models.streamdetails import StreamDetails
 
-if TYPE_CHECKING:  # keep runtime deps light
+from music_assistant.helpers.process import AsyncProcess
+from music_assistant.models.music_provider import MusicProvider
+
+if TYPE_CHECKING:  # Runtime-only imports keep startup fast
     from music_assistant.mass import MusicAssistant
     from music_assistant_models.provider import ProviderManifest
     from music_assistant.models import ProviderInstanceType
 
 # ────────────────────────────────────────────────────────────────────────────────
-# Config constants
+# Configuration constants
 # ────────────────────────────────────────────────────────────────────────────────
 BLUETOOTH_INPUT_ID = "bluetooth_input"
 
@@ -58,30 +58,30 @@ CONF_DISPLAY_NAME = "display_name"
 
 DEFAULT_SAMPLE_RATE = 48_000
 DEFAULT_CHANNELS = 2
-DEFAULT_BUFFER_MS = 40  # ms
+DEFAULT_BUFFER_MS = 40  # ↔ ≈2 k samples @48 kHz – plenty but still snappy
 
 # ────────────────────────────────────────────────────────────────────────────────
-# Music Assistant entry points
+# Public entry points
 # ────────────────────────────────────────────────────────────────────────────────
 async def setup(
-    mass: "MusicAssistant", manifest: "ProviderManifest", config: ProviderConfig
+    mass: MusicAssistant, manifest: "ProviderManifest", config: ProviderConfig
 ) -> "ProviderInstanceType":
     return BluetoothInputProvider(mass, manifest, config)
 
 
 async def get_config_entries(  # noqa: PLR0913
-    mass: "MusicAssistant",
+    mass: MusicAssistant,
     instance_id: str | None = None,
     action: str | None = None,
     values: dict[str, ConfigValueType] | None = None,
 ) -> tuple[ConfigEntry, ...]:
-    """Return configuration schema for the provider."""
+    """Return config UI for this provider."""
     return (
         ConfigEntry(
             key=CONF_DISPLAY_NAME,
             type=ConfigEntryType.STRING,
             label="Display Name",
-            description="Shown in browse and player bar",
+            description="Shown in player bar and browse view",
             default_value="Bluetooth Audio Input",
             required=True,
         ),
@@ -89,14 +89,14 @@ async def get_config_entries(  # noqa: PLR0913
             key=CONF_PULSE_SOURCE,
             type=ConfigEntryType.STRING,
             label="PulseAudio / PipeWire source",
-            description="e.g. bluez_source.XX.monitor (see `pactl list sources`)",
+            description="e.g. bluez_source.XX.monitor  (use pactl list sources)",
             default_value="default",
             required=True,
         ),
         ConfigEntry(
             key=CONF_SAMPLE_RATE,
             type=ConfigEntryType.INTEGER,
-            label="Sample Rate (Hz)",
+            label="Sample rate (Hz)",
             default_value=DEFAULT_SAMPLE_RATE,
         ),
         ConfigEntry(
@@ -108,15 +108,15 @@ async def get_config_entries(  # noqa: PLR0913
         ConfigEntry(
             key=CONF_BUFFER_MS,
             type=ConfigEntryType.INTEGER,
-            label="Buffer (ms)",
-            description="Lower → less latency, higher CPU. 20-50 ms is typical.",
+            label="FFmpeg buffer (ms)",
+            description="Lower = less latency but higher CPU; 20-50 ms is typical",
             default_value=DEFAULT_BUFFER_MS,
         ),
         ConfigEntry(
             key=CONF_AUTO_START,
             type=ConfigEntryType.BOOLEAN,
-            label="Keep Capture Alive",
-            description="Start capture immediately when MA boots",
+            label="Keep capture alive",
+            description="Start/keep the capture process running as soon as MA starts",
             default_value=True,
         ),
     )
@@ -125,17 +125,17 @@ async def get_config_entries(  # noqa: PLR0913
 # Provider implementation
 # ────────────────────────────────────────────────────────────────────────────────
 class BluetoothInputProvider(MusicProvider):
-    """Real-time Bluetooth audio capture provider."""
+    """Real-time Bluetooth audio capture provider (PulseAudio / PipeWire)."""
 
-    _proc: AsyncProcess | None
-    _watchdog: asyncio.Task | None
+    _capture_proc: AsyncProcess | None
+    _monitor: asyncio.Task | None
     _running: bool
 
-    # ─────────── MA lifecycle ───────────
+    # ──────────────  MA hooks  ──────────────
     async def loaded_in_mass(self) -> None:
         await super().loaded_in_mass()
-        self._proc = None
-        self._watchdog = None
+        self._capture_proc = None
+        self._monitor = None
         self._running = False
         if self.config.get_value(CONF_AUTO_START):
             await self._start_capture()
@@ -144,17 +144,21 @@ class BluetoothInputProvider(MusicProvider):
         await self._stop_capture()
         await super().unload(is_removed)
 
-    # ─────────── Capabilities ───────────
+    # ──────────────  Capabilities  ──────────────
     @property
     def supported_features(self) -> set[ProviderFeature]:
-        return {ProviderFeature.BROWSE, ProviderFeature.LIBRARY_RADIOS}
+        return {
+            ProviderFeature.BROWSE,
+            ProviderFeature.LIBRARY_RADIOS,
+        }
 
     @property
-    def is_streaming_provider(self) -> bool:
+    def is_streaming_provider(self) -> bool:  # Library == Catalog here
         return False
 
-    # ─────────── Library items ───────────
+    # ──────────────  Library items  ──────────────
     async def get_library_radios(self) -> AsyncGenerator[Radio, None]:
+        """Expose the live input as a ‘Radio’ item."""
         yield self._build_radio()
 
     async def get_radio(self, prov_radio_id: str) -> Radio:
@@ -162,10 +166,10 @@ class BluetoothInputProvider(MusicProvider):
             raise MediaNotFoundError(prov_radio_id)
         return self._build_radio()
 
-    # ─────────── Playback ───────────
+    # ──────────────  Playback  ──────────────
     async def get_stream_details(
-        self, item_id: str, media_type: MediaType  # noqa: ARG002
-    ) -> StreamDetails:
+        self, item_id: str, media_type: MediaType
+    ) -> StreamDetails:  # noqa: D401 – MA signature
         if item_id != BLUETOOTH_INPUT_ID:
             raise MediaNotFoundError(item_id)
 
@@ -190,16 +194,17 @@ class BluetoothInputProvider(MusicProvider):
     async def get_audio_stream(
         self, streamdetails: StreamDetails, seek_position: int = 0  # noqa: ARG002
     ) -> AsyncGenerator[bytes, None]:
+        """Yield raw PCM directly from the FFmpeg capture process."""
         if not self._running:
             await self._start_capture()
 
-        assert self._proc and not self._proc.closed
-        async for chunk in self._proc.iter_any():
+        assert self._capture_proc and not self._capture_proc.closed
+        async for chunk in self._capture_proc.iter_any():
             yield chunk
 
-    # ─────────── Image resolver ───────────
-    async def resolve_image(self, path: str) -> str | bytes:
-        if path == "icon.svg":
+    # ──────────────  Image resolver  ──────────────
+    async def resolve_image(self, path: str) -> str | bytes:  # noqa: D401
+        if path == "icon.svg":  # served from package dir
             return (
                 '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">'
                 '<path d="M17.71 7.71 12 2h-1v7.59L6.41 5 5 '
@@ -209,8 +214,9 @@ class BluetoothInputProvider(MusicProvider):
             )
         return path
 
-    # ─────────── Helpers ───────────
+    # ──────────────  Internal helpers  ──────────────
     def _build_radio(self) -> Radio:
+        """Return a Radio object reflecting current config."""
         name = self.config.get_value(CONF_DISPLAY_NAME)
         rate = self.config.get_value(CONF_SAMPLE_RATE)
         ch = self.config.get_value(CONF_CHANNELS)
@@ -247,76 +253,167 @@ class BluetoothInputProvider(MusicProvider):
             ),
         )
 
-    # ─────────── Capture process ───────────
+    # ──────────────  Capture process management  ──────────────
     async def _start_capture(self) -> None:
         if self._running:
             return
 
-        src = str(self.config.get_value(CONF_PULSE_SOURCE))
-        rate = int(self.config.get_value(CONF_SAMPLE_RATE))
-        ch = int(self.config.get_value(CONF_CHANNELS))
-        buf_ms = int(self.config.get_value(CONF_BUFFER_MS))
-        frag = int(rate * ch * (buf_ms / 1000))  # bytes per fragment (approx.)
+        src = self.config.get_value(CONF_PULSE_SOURCE)
+        rate = self.config.get_value(CONF_SAMPLE_RATE)
+        ch = self.config.get_value(CONF_CHANNELS)
+        buf_ms = self.config.get_value(CONF_BUFFER_MS)
 
-        cmd = [
-            "ffmpeg",
-            "-hide_banner",
-            "-loglevel",
-            "warning",
-            # Input (Pulse/ PipeWire)
-            "-f",
-            "pulse",
-            "-fragment_size",
-            str(frag),
-            "-i",
-            src,
-            # Processing / output
-            "-ac",
-            str(ch),
-            "-ar",
-            str(rate),
-            "-sample_fmt",
-            "s16",
-            "-acodec",
-            "pcm_s16le",
-            "-flags",
-            "+low_delay",
-            "-fflags",
-            "+nobuffer",
-            "-max_delay",
-            "0",
-            "-f",
-            "s16le",
-            "-",  # stdout → MA pipeline
-        ]
+        # Validate the source - make sure it's not SVG content or other invalid input
+        if not src or src.startswith('<') or 'svg' in src.lower():
+            self.logger.error("Invalid audio source configured: %s", src)
+            raise ProviderUnavailableError(f"Invalid audio source: {src}")
 
-        self.logger.debug("Starting capture: %s", " ".join(cmd))
         try:
-            self._proc = AsyncProcess(cmd, stdout=True, stderr=True)
-            await self._proc.start()
-        except Exception as err:
-            self.logger.error("Unable to start FFmpeg: %s", err)
-            raise ProviderUnavailableError(err) from err
+            ffmpeg_cmd = [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "warning",
+                # Pulse / PipeWire input
+                "-f",
+                "pulse",
+                "-i",
+                src,
+                # Low-latency flags
+                "-flags",
+                "+low_delay",
+                "-fflags",
+                "+nobuffer",
+                "-max_delay",
+                "0",
+                "-use_wallclock_as_timestamps",
+                "1",
+                "-flush_packets",
+                "1",
+                # Force PCM output
+                "-ac",
+                str(ch),
+                "-ar",
+                str(rate),
+                "-sample_fmt",
+                "s16",
+                "-acodec",
+                "pcm_s16le",
+                # Reduce internal buffer size
+                "-fragment_size",
+                str(int(rate * ch * (buf_ms / 1000))),
+                # Pipe raw data to stdout
+                "-f",
+                "s16le",
+                "-",
+            ]
 
-        self._running = True
-        self._watchdog = asyncio.create_task(self._watchdog_loop())
+            self.logger.debug("Starting FFmpeg capture: %s", " ".join(ffmpeg_cmd))
+            self._capture_proc = AsyncProcess(ffmpeg_cmd, stdout=True, stderr=True)
+            await self._capture_proc.start()
+            self._running = True
+
+            # Kick off watchdog
+            self._monitor = asyncio.create_task(self._watchdog())
+            
+        except Exception as err:
+            self.logger.error("Failed to start capture process: %s", err)
+            self._running = False
+            raise ProviderUnavailableError(f"Failed to start audio capture: {err}")
 
     async def _stop_capture(self) -> None:
         self._running = False
-        if self._watchdog and not self._watchdog.done():
-            self._watchdog.cancel()
+        if self._monitor and not self._monitor.done():
+            self._monitor.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await self._watchdog
-        if self._proc and not self._proc.closed:
-            await self._proc.close()
+                await self._monitor
+        if self._capture_proc and not self._capture_proc.closed:
+            await self._capture_proc.close()
 
-    async def _watchdog_loop(self) -> None:
+    async def _watchdog(self) -> None:
+        """Restart FFmpeg automatically if it exits unexpectedly."""
+        restart_count = 0
+        max_restarts = 5
+        
         while self._running:
             await asyncio.sleep(3)
             if (
-                self._proc is None
-                or self._proc.closed
-                or self._proc.returncode is not None
+                self._capture_proc is None
+                or self._capture_proc.closed
+                or self._capture_proc.returncode is not None
             ):
-                self.logger.warning("Capture process died – restarting")
-                await self._start_capture()
+                if restart_count >= max_restarts:
+                    self.logger.error("FFmpeg process died too many times (%d), stopping capture", restart_count)
+                    self._running = False
+                    break
+                
+                restart_count += 1
+                self.logger.warning("Capture process died (attempt %d/%d), restarting in 2 seconds", restart_count, max_restarts)
+                await asyncio.sleep(2)
+                
+                # Restart the process without creating a new watchdog
+                if self._running:
+                    try:
+                        if self._capture_proc and not self._capture_proc.closed:
+                            await self._capture_proc.close()
+                        
+                        src = self.config.get_value(CONF_PULSE_SOURCE)
+                        rate = self.config.get_value(CONF_SAMPLE_RATE)
+                        ch = self.config.get_value(CONF_CHANNELS)
+                        buf_ms = self.config.get_value(CONF_BUFFER_MS)
+
+                        # Validate the source before attempting restart
+                        if not src or src.startswith('<') or 'svg' in src.lower():
+                            self.logger.error("Invalid audio source configured, stopping restarts: %s", src)
+                            self._running = False
+                            break
+
+                        ffmpeg_cmd = [
+                            "ffmpeg",
+                            "-hide_banner",
+                            "-loglevel",
+                            "warning",
+                            # Pulse / PipeWire input
+                            "-f",
+                            "pulse",
+                            "-i",
+                            src,
+                            # Low-latency flags
+                            "-flags",
+                            "+low_delay",
+                            "-fflags",
+                            "+nobuffer",
+                            "-max_delay",
+                            "0",
+                            "-use_wallclock_as_timestamps",
+                            "1",
+                            "-flush_packets",
+                            "1",
+                            # Force PCM output
+                            "-ac",
+                            str(ch),
+                            "-ar",
+                            str(rate),
+                            "-sample_fmt",
+                            "s16",
+                            "-acodec",
+                            "pcm_s16le",
+                            # Reduce internal buffer size
+                            "-fragment_size",
+                            str(int(rate * ch * (buf_ms / 1000))),
+                            # Pipe raw data to stdout
+                            "-f",
+                            "s16le",
+                            "-",
+                        ]
+
+                        self.logger.debug("Restarting FFmpeg capture: %s", " ".join(ffmpeg_cmd))
+                        self._capture_proc = AsyncProcess(ffmpeg_cmd, stdout=True, stderr=True)
+                        await self._capture_proc.start()
+                        
+                    except Exception as err:
+                        self.logger.error("Failed to restart capture process: %s", err)
+                        continue
+            else:
+                # Process is running fine, reset restart count
+                restart_count = 0
