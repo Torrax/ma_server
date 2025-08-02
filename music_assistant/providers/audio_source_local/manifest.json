@@ -1,0 +1,13 @@
+{
+  "type": "music",
+  "domain": "audio_source_local",
+  "stage": "beta",
+  "name": "Local Audio Source",
+  "description": "Capture audio from locally connected audio sources (Bluetooth, line-in, etc.) and stream through Music Assistant using FFmpeg.",
+  "codeowners": ["@music-assistant"],
+  "requirements": [],
+  "documentation": "https://music-assistant.io/music-providers/audio-source-local/",
+  "multi_instance": true,
+  "builtin": false,
+  "allow_disable": true
+}
