@@ -179,7 +179,40 @@ class BluetoothInputProvider(PluginProvider):
     def get_source(self) -> PluginSource:
         """Return the plugin source."""
         if not self._plugin_source:
-            raise ProviderUnavailableError("Plugin source not initialized")
+            # If plugin source is not initialized yet, create a basic one
+            # This can happen during startup when MA queries sources before full initialization
+            self.logger.warning("Plugin source requested before full initialization, creating basic source")
+            sample_rate = self.config.get_value(CONF_SAMPLE_RATE)
+            channels = self.config.get_value(CONF_CHANNELS)
+            
+            # Create a named pipe for real-time audio streaming
+            import tempfile
+            self._named_pipe = os.path.join(tempfile.gettempdir(), f"bluetooth_input_{self.instance_id}")
+            
+            # Create image using the provider's icon
+            provider_icon = MediaItemImage(
+                type=ImageType.THUMB,
+                path=f"provider://{self.domain}/icon.svg",
+            )
+            
+            self._plugin_source = PluginSource(
+                id=self.instance_id,
+                name="Bluetooth Audio Input",
+                passive=False,
+                # Kept `can_play_pause=False` and `can_seek=False` to maintain live streaming behavior
+                # Users can only pause/control from their phone, not from Music Assistant interface
+                can_play_pause=False,
+                can_seek=False,
+                audio_format=AudioFormat(
+                    content_type=ContentType.PCM_S16LE,
+                    sample_rate=sample_rate,
+                    bit_depth=DEFAULT_BIT_DEPTH,
+                    channels=channels,
+                ),
+                stream_type=StreamType.NAMED_PIPE,
+                path=self._named_pipe,
+                image=provider_icon,
+            )
         return self._plugin_source
 
 
