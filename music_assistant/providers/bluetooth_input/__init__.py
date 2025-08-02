@@ -17,12 +17,12 @@ from music_assistant_models.config_entries import ConfigEntry, ConfigValueType, 
 from music_assistant_models.enums import (
     ConfigEntryType,
     ContentType,
-    ImageType,
     ProviderFeature,
     StreamType,
 )
 from music_assistant_models.errors import ProviderUnavailableError
-from music_assistant_models.media_items import AudioFormat, MediaItemImage
+from music_assistant_models.media_items import AudioFormat
+from music_assistant_models.player import PlayerMedia
 from music_assistant.helpers.process import AsyncProcess
 from music_assistant.models.plugin import PluginProvider, PluginSource
 
@@ -140,14 +140,6 @@ class BluetoothInputProvider(PluginProvider):
         import tempfile
         self._named_pipe = os.path.join(tempfile.gettempdir(), f"bluetooth_input_{self.instance_id}")
         
-        # Create image using the provider's icon
-        provider_icon = MediaItemImage(
-            type=ImageType.THUMB,
-            path=f"provider://{self.domain}/icon.svg",
-            provider=self.domain,
-            remotely_accessible=False,
-        )
-        
         self._plugin_source = PluginSource(
             id=self.instance_id,
             name="Bluetooth Audio Input",
@@ -164,7 +156,12 @@ class BluetoothInputProvider(PluginProvider):
             ),
             stream_type=StreamType.NAMED_PIPE,
             path=self._named_pipe,
-            image=provider_icon,
+            metadata=PlayerMedia(
+                uri="bluetooth_input",
+                title="Bluetooth Audio Input",
+                artist="Bluetooth Device",
+                image_url=f"provider://{self.domain}/icon.svg",
+            ),
         )
         
         self.logger.info("Created Bluetooth Audio Input source: %s", self._plugin_source.name)
@@ -191,14 +188,6 @@ class BluetoothInputProvider(PluginProvider):
             import tempfile
             self._named_pipe = os.path.join(tempfile.gettempdir(), f"bluetooth_input_{self.instance_id}")
             
-            # Create image using the provider's icon
-            provider_icon = MediaItemImage(
-                type=ImageType.THUMB,
-                path=f"provider://{self.domain}/icon.svg",
-                provider=self.domain,
-                remotely_accessible=False,
-            )
-            
             self._plugin_source = PluginSource(
                 id=self.instance_id,
                 name="Bluetooth Audio Input",
@@ -215,7 +204,12 @@ class BluetoothInputProvider(PluginProvider):
                 ),
                 stream_type=StreamType.NAMED_PIPE,
                 path=self._named_pipe,
-                image=provider_icon,
+                metadata=PlayerMedia(
+                    uri="bluetooth_input",
+                    title="Bluetooth Audio Input",
+                    artist="Bluetooth Device",
+                    image_url=f"provider://{self.domain}/icon.svg",
+                ),
             )
         return self._plugin_source
 
