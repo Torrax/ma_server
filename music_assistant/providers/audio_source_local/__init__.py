@@ -247,10 +247,10 @@ async def _get_audio_device_info() -> str:
 async def _get_image_info() -> str:
     """Get formatted information about available custom images."""
     return ("Available Custom Images:\n"
-            "• bluetooth.svg – Bluetooth audio icon\n"
-            "• cable.svg – Wired/cable audio icon\n"
-            "• stereo.svg – Stereo/speaker audio icon\n"
-            "• icon.svg – Default provider icon (leave blank for default)")
+            "• bluetooth – Bluetooth audio icon\n"
+            "• cable – Wired/cable audio icon\n"
+            "• stereo – Stereo/speaker audio icon\n"
+            "• default – Default provider icon (leave blank for default)")
 
 
 async def _get_audio_devices() -> list[str]:
@@ -364,9 +364,19 @@ class LocalAudioSourceProvider(MusicProvider):
         if not custom_image or custom_image.strip() == "":
             image_path = "icon.svg"
         else:
-            # Check if it's one of our custom images
-            if custom_image in ("bluetooth.svg", "cable.svg", "stereo.svg", "icon.svg"):
-                image_path = custom_image
+            # Map simple names to actual file names
+            image_mapping = {
+                "bluetooth": "bluetooth.svg",
+                "cable": "cable.svg", 
+                "stereo": "stereo.svg",
+                "default": "icon.svg",
+                "icon": "icon.svg"
+            }
+            
+            # Check if it's one of our custom images (with or without .svg)
+            clean_name = custom_image.replace(".svg", "").lower()
+            if clean_name in image_mapping:
+                image_path = image_mapping[clean_name]
             else:
                 image_path = "icon.svg"  # Fallback to default
         
