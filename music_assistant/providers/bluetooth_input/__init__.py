@@ -144,6 +144,8 @@ class BluetoothInputProvider(PluginProvider):
         provider_icon = MediaItemImage(
             type=ImageType.THUMB,
             path=f"provider://{self.domain}/icon.svg",
+            provider=self.domain,
+            remotely_accessible=False,
         )
         
         self._plugin_source = PluginSource(
@@ -193,6 +195,8 @@ class BluetoothInputProvider(PluginProvider):
             provider_icon = MediaItemImage(
                 type=ImageType.THUMB,
                 path=f"provider://{self.domain}/icon.svg",
+                provider=self.domain,
+                remotely_accessible=False,
             )
             
             self._plugin_source = PluginSource(
