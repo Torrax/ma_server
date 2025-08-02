@@ -21,7 +21,7 @@ from music_assistant_models.enums import (
     StreamType,
 )
 from music_assistant_models.errors import ProviderUnavailableError
-from music_assistant_models.media_items import AudioFormat
+from music_assistant_models.media_items import AudioFormat, ImageType, MediaItemImage
 from music_assistant.helpers.process import AsyncProcess
 from music_assistant.models.plugin import PluginProvider, PluginSource
 
@@ -139,10 +139,18 @@ class BluetoothInputProvider(PluginProvider):
         import tempfile
         self._named_pipe = os.path.join(tempfile.gettempdir(), f"bluetooth_input_{self.instance_id}")
         
+        # Create image using the provider's icon
+        provider_icon = MediaItemImage(
+            type=ImageType.THUMB,
+            path=f"provider://{self.domain}/icon.svg",
+        )
+        
         self._plugin_source = PluginSource(
             id=self.instance_id,
             name="Bluetooth Audio Input",
             passive=False,
+            # Kept `can_play_pause=False` and `can_seek=False` to maintain live streaming behavior
+            # Users can only pause/control from their phone, not from Music Assistant interface
             can_play_pause=False,
             can_seek=False,
             audio_format=AudioFormat(
@@ -153,6 +161,7 @@ class BluetoothInputProvider(PluginProvider):
             ),
             stream_type=StreamType.NAMED_PIPE,
             path=self._named_pipe,
+            image=provider_icon,
         )
         
         self.logger.info("Created Bluetooth Audio Input source: %s", self._plugin_source.name)
