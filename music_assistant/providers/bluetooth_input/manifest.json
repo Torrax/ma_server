@@ -1,15 +1,13 @@
 {
   "type": "music",
-  "domain": "bluetooth_input",
+  "domain": "local_audio_source",
   "stage": "beta",
-  "name": "Bluetooth Audio Input",
-  "description": "Capture audio from locally connected Bluetooth receivers and stream through Music Assistant using FFmpeg.",
-  "codeowners": ["@Torrax"],
+  "name": "Local Audio Source",
+  "description": "Capture audio from locally connected audio sources (Bluetooth, line-in, etc.) and stream through Music Assistant using FFmpeg.",
+  "codeowners": ["@music-assistant"],
   "requirements": [],
-  "documentation": "",
+  "documentation": "https://music-assistant.io/music-providers/local-audio-source/",
   "multi_instance": true,
   "builtin": false,
   "allow_disable": true
 }
-
-
