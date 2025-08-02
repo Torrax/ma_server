@@ -152,13 +152,13 @@ async def _get_audio_device_info() -> str:
             output = stdout.decode()
             lines = output.split('\n')
             
-            device_info = ["📻 Available Audio Input Devices:"]
-            device_info.append("")  # Empty line for spacing
+            device_info = ["Available Audio Input Devices:"]
             
-            # Add common devices first
-            device_info.append("• default - System default audio input")
-            device_info.append("• pulse - PulseAudio device (if available)")
-            device_info.append("")
+            # Add default device first
+            device_info.append("• default – System default audio input")
+            
+            # Track devices we've already added to avoid duplicates
+            added_devices = set()
             
             # Parse hardware devices
             for line in lines:
@@ -188,38 +188,49 @@ async def _get_audio_device_info() -> str:
                         else:
                             device_desc = device_desc_part.strip()
                         
-                        # Format device entries
-                        device_id_full = f"hw:{card_num},{device_num}"
-                        device_id_simple = f"hw:{card_num}"
+                        # Determine the best device identifier to show
+                        if device_num == "0":
+                            # For device 0, use simplified hw:card format
+                            device_id = f"hw:{card_num}"
+                            if device_desc and device_desc != card_description:
+                                display_text = f"• {device_id} – {card_description} ({device_desc})"
+                            else:
+                                display_text = f"• {device_id} – {card_description}"
+                        else:
+                            # For other devices, use full hw:card,device format
+                            device_id = f"hw:{card_num},{device_num}"
+                            if device_desc and device_desc != card_description:
+                                display_text = f"• {device_id} – {card_description} ({device_desc})"
+                            else:
+                                display_text = f"• {device_id} – {card_description}"
                         
-                        device_info.append(f"• {device_id_full} - {card_description} ({device_desc})")
-                        if device_id_simple != device_id_full:
-                            device_info.append(f"• {device_id_simple} - {card_description} (simplified)")
+                        # Only add if we haven't seen this device ID before
+                        if device_id not in added_devices:
+                            device_info.append(display_text)
+                            added_devices.add(device_id)
                         
                     except (IndexError, ValueError):
                         continue
             
-            if len(device_info) <= 4:  # Only default entries, no hardware found
+            if len(device_info) <= 1:  # Only default entry, no hardware found
                 device_info.append("⚠️  No hardware audio devices detected")
-                device_info.append("   Try: default, pulse, or check your audio setup")
+                device_info.append("   Try: default or check your audio setup")
             
             return "\n".join(device_info)
             
     except FileNotFoundError:
-        return ("📻 Audio Device Detection:\n\n"
+        return ("Available Audio Input Devices:\n"
                 "⚠️  'arecord' command not found\n"
                 "   Install alsa-utils package for device detection\n\n"
                 "Common devices to try:\n"
-                "• default - System default audio input\n"
-                "• pulse - PulseAudio device\n"
-                "• hw:0, hw:1, hw:2 - Hardware devices")
+                "• default – System default audio input\n"
+                "• hw:0, hw:1, hw:2 – Hardware devices")
     except Exception as e:
-        return ("📻 Audio Device Detection:\n\n"
+        return ("Available Audio Input Devices:\n"
                 f"⚠️  Error detecting devices: {str(e)}\n\n"
                 "Common devices to try:\n"
-                "• default - System default audio input\n"
-                "• pulse - PulseAudio device\n"
-                "• hw:0, hw:1, hw:2 - Hardware devices")
+                "• default – System default audio input\n"
+                "• hw:0, hw:1, hw:2 – Hardware devices")
 
 
 async def _get_audio_devices() -> list[str]:
