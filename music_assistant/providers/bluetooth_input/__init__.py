@@ -17,11 +17,12 @@ from music_assistant_models.config_entries import ConfigEntry, ConfigValueType, 
 from music_assistant_models.enums import (
     ConfigEntryType,
     ContentType,
+    ImageType,
     ProviderFeature,
     StreamType,
 )
 from music_assistant_models.errors import ProviderUnavailableError
-from music_assistant_models.media_items import AudioFormat, ImageType, MediaItemImage
+from music_assistant_models.media_items import AudioFormat, MediaItemImage
 from music_assistant.helpers.process import AsyncProcess
 from music_assistant.models.plugin import PluginProvider, PluginSource
 
