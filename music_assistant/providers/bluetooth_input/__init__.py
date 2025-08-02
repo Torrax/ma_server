@@ -117,7 +117,7 @@ async def get_config_entries(  # noqa: PLR0913
             type=ConfigEntryType.BOOLEAN,
             label="Keep capture alive",
             description="Start/keep the capture process running as soon as MA starts",
-            default_value=True,
+            default_value=False,
         ),
     )
 
@@ -138,7 +138,15 @@ class BluetoothInputProvider(MusicProvider):
         self._monitor = None
         self._running = False
         if self.config.get_value(CONF_AUTO_START):
-            await self._start_capture()
+            # Validate configuration before auto-starting
+            src = self.config.get_value(CONF_PULSE_SOURCE)
+            if src and not src.startswith('<') and 'svg' not in src.lower() and len(src) <= 100:
+                try:
+                    await self._start_capture()
+                except ProviderUnavailableError as err:
+                    self.logger.warning("Auto-start failed: %s", err)
+            else:
+                self.logger.warning("Auto-start disabled due to invalid audio source configuration: %r", src)
 
     async def unload(self, is_removed: bool = False) -> None:
         await self._stop_capture()
@@ -263,17 +271,20 @@ class BluetoothInputProvider(MusicProvider):
         ch = self.config.get_value(CONF_CHANNELS)
         buf_ms = self.config.get_value(CONF_BUFFER_MS)
 
+        self.logger.info("Attempting to start capture with source: %r", src)
+
         # Validate the source - make sure it's not SVG content or other invalid input
-        if not src or src.startswith('<') or 'svg' in src.lower():
-            self.logger.error("Invalid audio source configured: %s", src)
-            raise ProviderUnavailableError(f"Invalid audio source: {src}")
+        if not src or src.startswith('<') or 'svg' in src.lower() or len(src) > 100:
+            self.logger.error("Invalid audio source configured (len=%d): %s", len(src) if src else 0, src[:100] if src else "None")
+            self._running = False
+            raise ProviderUnavailableError(f"Invalid audio source configured. Please check your PulseAudio/PipeWire source setting.")
 
         try:
             ffmpeg_cmd = [
                 "ffmpeg",
                 "-hide_banner",
                 "-loglevel",
-                "warning",
+                "error",  # Changed to error to see actual issues
                 # Pulse / PipeWire input
                 "-f",
                 "pulse",
@@ -308,7 +319,7 @@ class BluetoothInputProvider(MusicProvider):
                 "-",
             ]
 
-            self.logger.debug("Starting FFmpeg capture: %s", " ".join(ffmpeg_cmd))
+            self.logger.info("Starting FFmpeg capture: %s", " ".join(ffmpeg_cmd))
             self._capture_proc = AsyncProcess(ffmpeg_cmd, stdout=True, stderr=True)
             await self._capture_proc.start()
             self._running = True
