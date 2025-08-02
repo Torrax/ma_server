@@ -4,10 +4,11 @@
   "stage": "beta",
   "name": "Bluetooth Audio Input",
   "description": "Capture audio from locally connected Bluetooth receivers and stream through Music Assistant using FFmpeg.",
-  "codeowners": ["@music-assistant"],
+  "codeowners": ["@Torrax"],
   "requirements": [],
-  "documentation": "https://music-assistant.io/music-providers/bluetooth-input/",
+  "documentation": "",
   "multi_instance": true,
   "builtin": false,
   "allow_disable": true
 }
+
