@@ -50,6 +50,7 @@ DEFAULT_BIT_DEPTH = 16
 
 # Configuration keys
 CONF_CUSTOM_NAME = "custom_name"
+CONF_CUSTOM_IMAGE = "custom_image"
 CONF_AUDIO_DEVICE = "audio_device"
 CONF_SAMPLE_RATE = "sample_rate"
 CONF_CHANNELS = "channels"
@@ -77,8 +78,9 @@ async def get_config_entries(
     action: [optional] action key called from config entries UI.
     values: the (intermediate) raw values for config entries sent with the action.
     """
-    # Get available audio devices for display
+    # Get available audio devices and images for display
     device_info = await _get_audio_device_info()
+    image_info = await _get_image_info()
     
     return (
         ConfigEntry(
@@ -87,6 +89,19 @@ async def get_config_entries(
             label="Custom Name",
             description="Custom name for this audio source (e.g., 'Living Room Bluetooth', 'Turntable')",
             default_value="Local Audio Source",
+            required=False,
+        ),
+        ConfigEntry(
+            key="image_info_label",
+            type=ConfigEntryType.LABEL,
+            label=image_info,
+        ),
+        ConfigEntry(
+            key=CONF_CUSTOM_IMAGE,
+            type=ConfigEntryType.STRING,
+            label="Custom Image",
+            description="Enter one of the image names shown above (leave blank for default icon.svg)",
+            default_value="",
             required=False,
         ),
         ConfigEntry(
@@ -152,10 +167,7 @@ async def _get_audio_device_info() -> str:
             output = stdout.decode()
             lines = output.split('\n')
             
-            device_info = ["Available Audio Input Devices:"]
-            
-            # Add default device first
-            device_info.append("• default – System default audio input")
+            device_info = "Available Audio Input Devices:\n• default – System default audio input"
             
             # Track devices we've already added to avoid duplicates
             added_devices = set()
@@ -206,17 +218,16 @@ async def _get_audio_device_info() -> str:
                         
                         # Only add if we haven't seen this device ID before
                         if device_id not in added_devices:
-                            device_info.append(display_text)
+                            device_info += f"\n{display_text}"
                             added_devices.add(device_id)
                         
                     except (IndexError, ValueError):
                         continue
             
-            if len(device_info) <= 1:  # Only default entry, no hardware found
-                device_info.append("⚠️  No hardware audio devices detected")
-                device_info.append("   Try: default or check your audio setup")
+            if len(added_devices) == 0:  # No hardware devices found
+                device_info += "\n⚠️  No hardware audio devices detected\n   Try: default or check your audio setup"
             
-            return "\n".join(device_info)
+            return device_info
             
     except FileNotFoundError:
         return ("Available Audio Input Devices:\n"
@@ -231,6 +242,15 @@ async def _get_audio_device_info() -> str:
                 "Common devices to try:\n"
                 "• default – System default audio input\n"
                 "• hw:0, hw:1, hw:2 – Hardware devices")
+
+
+async def _get_image_info() -> str:
+    """Get formatted information about available custom images."""
+    return ("Available Custom Images:\n"
+            "• bluetooth.svg – Bluetooth audio icon\n"
+            "• cable.svg – Wired/cable audio icon\n"
+            "• stereo.svg – Stereo/speaker audio icon\n"
+            "• icon.svg – Default provider icon (leave blank for default)")
 
 
 async def _get_audio_devices() -> list[str]:
@@ -339,6 +359,17 @@ class LocalAudioSourceProvider(MusicProvider):
         if not custom_name or custom_name.strip() == "":
             custom_name = "Local Audio Source"
         
+        # Get the custom image from config, fallback to default icon
+        custom_image = self.config.get_value(CONF_CUSTOM_IMAGE)
+        if not custom_image or custom_image.strip() == "":
+            image_path = "icon.svg"
+        else:
+            # Check if it's one of our custom images
+            if custom_image in ("bluetooth.svg", "cable.svg", "stereo.svg", "icon.svg"):
+                image_path = custom_image
+            else:
+                image_path = "icon.svg"  # Fallback to default
+        
         # Return the local audio input as a radio station
         yield Radio(
             item_id=AUDIO_SOURCE_ID,
@@ -363,7 +394,7 @@ class LocalAudioSourceProvider(MusicProvider):
                 images=UniqueList([
                     MediaItemImage(
                         type=ImageType.THUMB,
-                        path="icon.svg",
+                        path=image_path,
                         provider=self.domain,
                         remotely_accessible=False,
                     )
@@ -523,11 +554,19 @@ class LocalAudioSourceProvider(MusicProvider):
 
     async def resolve_image(self, path: str) -> str | bytes:
         """Resolve an image from an image path."""
+        import os
+        provider_dir = os.path.dirname(__file__)
+        
+        # Handle custom images from the images folder
+        if path in ("bluetooth.svg", "cable.svg", "stereo.svg"):
+            image_path = os.path.join(provider_dir, "images", path)
+            if os.path.exists(image_path):
+                return image_path
+        
+        # Handle default provider icons
         if path in ("icon.svg", "icon_monochrome.svg"):
-            # Return the path to the actual icon file in our provider directory
-            import os
-            provider_dir = os.path.dirname(__file__)
             icon_path = os.path.join(provider_dir, path)
             if os.path.exists(icon_path):
                 return icon_path
+        
         return path
