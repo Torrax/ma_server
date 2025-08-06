@@ -246,11 +246,43 @@ async def _get_audio_device_info() -> str:
 
 async def _get_image_info() -> str:
     """Get formatted information about available custom images."""
-    return ("Available Custom Images:\n"
-            "• bluetooth – Bluetooth audio icon\n"
-            "• cable – Wired/cable audio icon\n"
-            "• stereo – Stereo/speaker audio icon\n"
-            "• default – Default provider icon (leave blank for default)")
+    import os
+    
+    # Get the path to the images folder
+    provider_dir = os.path.dirname(__file__)
+    images_dir = os.path.join(provider_dir, "images")
+    
+    image_list = ["Available Custom Images:"]
+    
+    try:
+        if os.path.exists(images_dir):
+            # Get all image files in the images folder
+            image_files = []
+            for filename in os.listdir(images_dir):
+                if filename.lower().endswith(('.svg', '.png', '.jpg', '.jpeg', '.gif', '.webp')):
+                    # Remove extension for display
+                    name_without_ext = os.path.splitext(filename)[0]
+                    image_files.append((name_without_ext, filename))
+            
+            # Sort alphabetically
+            image_files.sort(key=lambda x: x[0].lower())
+            
+            # Add each image to the list
+            for name_without_ext, filename in image_files:
+                # Create a descriptive name based on the filename
+                display_name = name_without_ext.replace('_', ' ').replace('-', ' ').title()
+                image_list.append(f"• {name_without_ext.lower()} – {display_name} icon")
+        
+        if len(image_list) == 1:  # Only header, no images found
+            image_list.append("⚠️  No custom images found in images folder")
+    
+    except Exception as e:
+        image_list.append(f"⚠️  Error reading images folder: {str(e)}")
+    
+    # Always add the default option
+    image_list.append("• default – Default provider icon (leave blank for default)")
+    
+    return "\n".join(image_list)
 
 
 async def _get_audio_devices() -> list[str]:
@@ -364,21 +396,8 @@ class LocalAudioSourceProvider(MusicProvider):
         if not custom_image or custom_image.strip() == "":
             image_path = "icon.svg"
         else:
-            # Map simple names to actual file names
-            image_mapping = {
-                "bluetooth": "bluetooth.svg",
-                "cable": "cable.svg", 
-                "stereo": "stereo.svg",
-                "default": "icon.svg",
-                "icon": "icon.svg"
-            }
-            
-            # Check if it's one of our custom images (with or without .svg)
-            clean_name = custom_image.replace(".svg", "").lower()
-            if clean_name in image_mapping:
-                image_path = image_mapping[clean_name]
-            else:
-                image_path = "icon.svg"  # Fallback to default
+            # Dynamically find the image file in the images folder
+            image_path = await self._find_image_file(custom_image)
         
         # Return the local audio input as a radio station
         yield Radio(
@@ -639,13 +658,44 @@ class LocalAudioSourceProvider(MusicProvider):
                 self.logger.error("Error in capture monitor: %s", err)
                 await asyncio.sleep(5)
 
+    async def _find_image_file(self, image_name: str) -> str:
+        """Find the actual image file based on the user input (case-insensitive)."""
+        import os
+        
+        # Handle special cases
+        if image_name.lower() in ("default", "icon"):
+            return "icon.svg"
+        
+        provider_dir = os.path.dirname(__file__)
+        images_dir = os.path.join(provider_dir, "images")
+        
+        if not os.path.exists(images_dir):
+            return "icon.svg"  # Fallback to default
+        
+        # Clean the input name (remove extension if provided, make lowercase)
+        clean_name = image_name.replace(".svg", "").replace(".png", "").replace(".jpg", "").replace(".jpeg", "").replace(".gif", "").replace(".webp", "").lower()
+        
+        try:
+            # Look for matching files in the images folder
+            for filename in os.listdir(images_dir):
+                if filename.lower().endswith(('.svg', '.png', '.jpg', '.jpeg', '.gif', '.webp')):
+                    # Remove extension and compare
+                    file_name_without_ext = os.path.splitext(filename)[0].lower()
+                    if file_name_without_ext == clean_name:
+                        return filename
+        except Exception:
+            pass
+        
+        # If no match found, fallback to default
+        return "icon.svg"
+
     async def resolve_image(self, path: str) -> str | bytes:
         """Resolve an image from an image path."""
         import os
         provider_dir = os.path.dirname(__file__)
         
-        # Handle custom images from the images folder
-        if path in ("bluetooth.svg", "cable.svg", "stereo.svg"):
+        # Handle custom images from the images folder (any image file)
+        if not path.endswith(("icon.svg", "icon_monochrome.svg")):
             image_path = os.path.join(provider_dir, "images", path)
             if os.path.exists(image_path):
                 return image_path
