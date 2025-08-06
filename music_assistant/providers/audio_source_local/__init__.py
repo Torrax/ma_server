@@ -408,7 +408,7 @@ class LocalAudioSourceProvider(MusicProvider):
         # Return the local audio input as a radio station
         yield Radio(
             item_id=audio_source_id,
-            provider=self.instance_id,
+            provider=self.domain,
             name=custom_name,
             provider_mappings={
                 ProviderMapping(
@@ -430,7 +430,7 @@ class LocalAudioSourceProvider(MusicProvider):
                     MediaItemImage(
                         type=ImageType.THUMB,
                         path=image_path,
-                        provider=self.instance_id,
+                        provider=self.domain,
                         remotely_accessible=False,
                     )
                 ]),
