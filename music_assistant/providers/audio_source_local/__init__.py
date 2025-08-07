@@ -100,7 +100,7 @@ async def get_config_entries(
             key=CONF_CUSTOM_IMAGE,
             type=ConfigEntryType.STRING,
             label="Custom Image",
-            description="Enter one of the image names shown above (leave blank for default icon.svg)",
+            description="Enter one of the image names shown above, or a URL to an SVG image (leave blank for default icon.svg)",
             default_value="",
             required=False,
         ),
@@ -279,8 +279,9 @@ async def _get_image_info() -> str:
     except Exception as e:
         image_list.append(f"⚠️  Error reading images folder: {str(e)}")
     
-    # Always add the default option
+    # Always add the default option and URL info
     image_list.append("• default – Default provider icon (leave blank for default)")
+    image_list.append("• URL – Enter any https:// URL to an SVG image")
     
     return "\n".join(image_list)
 
@@ -668,12 +669,16 @@ class LocalAudioSourceProvider(MusicProvider):
                 await asyncio.sleep(5)
 
     async def _find_image_file(self, image_name: str) -> str:
-        """Find the actual image file based on the user input (case-insensitive)."""
+        """Find the actual image file based on the user input (case-insensitive) or return URL if provided."""
         import os
         
         # Handle special cases
         if image_name.lower() in ("default", "icon"):
             return "icon.svg"
+        
+        # Check if it's a URL (starts with http:// or https://)
+        if image_name.startswith(("http://", "https://")):
+            return image_name  # Return URL as-is
         
         provider_dir = os.path.dirname(__file__)
         images_dir = os.path.join(provider_dir, "images")
@@ -699,8 +704,13 @@ class LocalAudioSourceProvider(MusicProvider):
         return "icon.svg"
 
     async def resolve_image(self, path: str) -> str | bytes:
-        """Resolve an image from an image path."""
+        """Resolve an image from an image path or URL."""
         import os
+        
+        # Handle URLs - return as-is for Music Assistant to fetch
+        if path.startswith(("http://", "https://")):
+            return path
+        
         provider_dir = os.path.dirname(__file__)
         
         # Handle custom images from the images folder (any image file)
