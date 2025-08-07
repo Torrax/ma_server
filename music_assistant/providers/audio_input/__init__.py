@@ -344,45 +344,15 @@ class AudioInputProvider(PluginProvider):
         self._start_capture_daemon()
 
     async def unload(self, is_removed: bool = False) -> None:
-        """Tear down."""
-        self.logger.info("Unloading audio input provider %s", self.friendly_name)
+        """Handle close/cleanup of the provider."""
         self._stop_called = True
-        
-        # Stop the capture process first
-        if self._capture_proc and not self._capture_proc.closed:
-            self.logger.info("Terminating capture process for %s", self.friendly_name)
-            try:
-                await self._capture_proc.close(True)  # Force kill
-            except Exception as err:
-                self.logger.warning("Error stopping capture process: %s", err)
-        
-        # Cancel the runner task
         if self._runner_task and not self._runner_task.done():
             self._runner_task.cancel()
             with suppress(asyncio.CancelledError):
                 await self._runner_task
-        
-        # Unregister callbacks
-        for cb in self._on_unload_callbacks:
-            try:
-                cb()
-            except Exception as err:
-                self.logger.warning("Error during callback cleanup: %s", err)
-        
-        # Clean up the named pipe
+        for callback in self._on_unload_callbacks:
+            callback()
         await self._cleanup_pipe()
-        
-        # Force update all players to remove this source from their source lists
-        for player in self.mass.players.all():
-            # Remove this source from the player's source list
-            player.source_list = [
-                source for source in player.source_list 
-                if source.id != self.instance_id
-            ]
-            # Update the player to refresh the UI
-            self.mass.players.update(player.player_id, force_update=True)
-        
-        self.logger.info("Audio input provider %s unloaded successfully", self.friendly_name)
 
     # ---------------- PluginProvider hooks ----------------
 
