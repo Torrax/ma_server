@@ -350,7 +350,7 @@ class AudioInputProvider(PluginProvider):
         await check_output("rm", "-f", self.named_pipe)
 
     async def _capture_runner(self) -> None:
-        """Background task: keep FFmpeg capture alive."""
+        """Background task: keep audio capture alive using arecord + FFmpeg pipeline."""
         self.logger.info("Starting audio capture daemon for %s", self.friendly_name)
         
         # Clean up any existing pipe and create new one
@@ -365,38 +365,22 @@ class AudioInputProvider(PluginProvider):
             
         await asyncio.sleep(0.1)  # ensure pipe exists before ffmpeg starts
 
-        ffmpeg_cmd: list[str] = [
-            "ffmpeg",
-            "-nostdin",
-            "-hide_banner",
-            "-loglevel",
-            "warning",  # Changed from "error" to get more info
-            "-f",
-            self.ffmpeg_format,
-            "-i",
-            self.ffmpeg_device,
-            "-ac",
-            str(self.channels),
-            "-ar",
-            str(self.sample_rate),
-            "-acodec",
-            "pcm_s16le",
-            "-f",
-            "s16le",
-            "-fflags",
-            "+nobuffer",
-            "-flags",
-            "+low_delay",
-            "-probesize",
-            "32",
-            "-analyzeduration",
-            "0",
-            self.named_pipe,
+        # Use arecord to capture audio and pipe to FFmpeg for processing
+        # This avoids FFmpeg's input format issues
+        capture_cmd: list[str] = [
+            "sh", "-c",
+            f"arecord -D {self.ffmpeg_device} -f S16_LE -c {self.channels} -r {self.sample_rate} -t raw | "
+            f"ffmpeg -nostdin -hide_banner -loglevel warning "
+            f"-f s16le -ac {self.channels} -ar {self.sample_rate} -i - "
+            f"-acodec pcm_s16le -f s16le "
+            f"-fflags +nobuffer -flags +low_delay "
+            f"-probesize 32 -analyzeduration 0 "
+            f"{self.named_pipe}"
         ]
 
         self.logger.info(
-            "Launching FFmpeg capture: %s",
-            " ".join(ffmpeg_cmd),
+            "Launching audio capture pipeline for device: %s",
+            self.ffmpeg_device,
         )
 
         retry_count = 0
@@ -404,7 +388,7 @@ class AudioInputProvider(PluginProvider):
 
         while not self._stop_called and retry_count < max_retries:
             self._capture_proc = proc = AsyncProcess(
-                ffmpeg_cmd, stdout=False, stderr=True, name=f"audio-capture[{self.friendly_name}]"
+                capture_cmd, stdout=False, stderr=True, name=f"audio-capture[{self.friendly_name}]"
             )
             
             try:
@@ -418,14 +402,14 @@ class AudioInputProvider(PluginProvider):
                 stderr_lines = []
                 async for line in proc.iter_stderr():
                     stderr_lines.append(line)
-                    self.logger.warning("FFmpeg stderr: %s", line)
+                    self.logger.warning("Capture stderr: %s", line)
 
                 # Wait for process to complete and get return code
                 return_code = await proc.wait()
                 
                 if return_code != 0:
                     self.logger.error(
-                        "FFmpeg process failed with return code %s. stderr output: %s",
+                        "Capture process failed with return code %s. stderr output: %s",
                         return_code,
                         "\n".join(stderr_lines[-10:])  # Last 10 lines
                     )
