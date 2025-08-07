@@ -340,21 +340,49 @@ class AudioInputProvider(PluginProvider):
 
     async def handle_async_init(self) -> None:
         """Spin up capture daemon once MA is ready."""
-        # Kill any existing processes using this device first
-        await self._kill_existing_processes()
         # Start the capture daemon immediately
         self._start_capture_daemon()
 
     async def unload(self, is_removed: bool = False) -> None:
-        """Handle close/cleanup of the provider."""
+        """Tear down."""
+        self.logger.info("Unloading audio input provider %s", self.friendly_name)
         self._stop_called = True
+        
+        # Stop the capture process first
+        if self._capture_proc and not self._capture_proc.closed:
+            self.logger.info("Terminating capture process for %s", self.friendly_name)
+            try:
+                await self._capture_proc.close(True)  # Force kill
+            except Exception as err:
+                self.logger.warning("Error stopping capture process: %s", err)
+        
+        # Cancel the runner task
         if self._runner_task and not self._runner_task.done():
             self._runner_task.cancel()
             with suppress(asyncio.CancelledError):
                 await self._runner_task
-        for callback in self._on_unload_callbacks:
-            callback()
+        
+        # Unregister callbacks
+        for cb in self._on_unload_callbacks:
+            try:
+                cb()
+            except Exception as err:
+                self.logger.warning("Error during callback cleanup: %s", err)
+        
+        # Clean up the named pipe
         await self._cleanup_pipe()
+        
+        # Force update all players to remove this source from their source lists
+        for player in self.mass.players.all():
+            # Remove this source from the player's source list
+            player.source_list = [
+                source for source in player.source_list 
+                if source.id != self.instance_id
+            ]
+            # Update the player to refresh the UI
+            self.mass.players.update(player.player_id, force_update=True)
+        
+        self.logger.info("Audio input provider %s unloaded successfully", self.friendly_name)
 
     # ---------------- PluginProvider hooks ----------------
 
@@ -437,47 +465,6 @@ class AudioInputProvider(PluginProvider):
     async def _cleanup_pipe(self) -> None:
         """Remove stale FIFO."""
         await check_output("rm", "-f", self.named_pipe)
-
-    async def _kill_existing_processes(self) -> None:
-        """Kill any existing processes using the same audio device."""
-        self.logger.info("Checking for existing processes using device %s", self.ffmpeg_device)
-        
-        try:
-            # Kill any arecord processes using this specific device
-            returncode, output = await check_output("pgrep", "-f", f"arecord.*{self.ffmpeg_device}")
-            if returncode == 0 and output:
-                pids = output.decode('utf-8').strip().split('\n')
-                for pid in pids:
-                    if pid.strip():
-                        self.logger.warning("Killing existing arecord process %s using device %s", pid, self.ffmpeg_device)
-                        await check_output("kill", "-9", pid.strip())
-                        
-            # Kill any ffmpeg processes that might be related to audio input
-            returncode, output = await check_output("pgrep", "-f", f"ffmpeg.*audio-capture")
-            if returncode == 0 and output:
-                pids = output.decode('utf-8').strip().split('\n')
-                for pid in pids:
-                    if pid.strip():
-                        self.logger.warning("Killing existing ffmpeg audio-capture process %s", pid)
-                        await check_output("kill", "-9", pid.strip())
-                        
-            # Kill any processes using our named pipes pattern
-            returncode, output = await check_output("pgrep", "-f", f"/tmp/audio_input--")
-            if returncode == 0 and output:
-                pids = output.decode('utf-8').strip().split('\n')
-                for pid in pids:
-                    if pid.strip():
-                        self.logger.warning("Killing existing audio input process %s", pid)
-                        await check_output("kill", "-9", pid.strip())
-                        
-            # Clean up any stale named pipes from previous instances
-            await check_output("rm", "-f", "/tmp/audio_input--*")
-            
-            # Give processes time to die
-            await asyncio.sleep(1)
-            
-        except Exception as err:
-            self.logger.debug("Error killing existing processes: %s", err)
 
     async def _capture_runner(self) -> None:
         """Background task: keep audio capture alive using arecord + FFmpeg pipeline."""
