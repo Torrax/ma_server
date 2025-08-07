@@ -226,7 +226,13 @@ class AudioInputProvider(PluginProvider):
         # Clean up any existing pipe and create new one
         await self._cleanup_pipe()
         await asyncio.sleep(0.1)
-        await check_output("mkfifo", self.named_pipe)
+        
+        try:
+            await check_output("mkfifo", self.named_pipe)
+        except Exception as err:
+            self.logger.error("Failed to create named pipe %s: %s", self.named_pipe, err)
+            return
+            
         await asyncio.sleep(0.1)  # ensure pipe exists before ffmpeg starts
 
         ffmpeg_cmd: list[str] = [
@@ -234,7 +240,7 @@ class AudioInputProvider(PluginProvider):
             "-nostdin",
             "-hide_banner",
             "-loglevel",
-            "error",
+            "warning",  # Changed from "error" to get more info
             "-f",
             self.backend,
             "-i",
@@ -263,25 +269,60 @@ class AudioInputProvider(PluginProvider):
             " ".join(ffmpeg_cmd),
         )
 
-        while not self._stop_called:
+        retry_count = 0
+        max_retries = 3
+
+        while not self._stop_called and retry_count < max_retries:
             self._capture_proc = proc = AsyncProcess(
                 ffmpeg_cmd, stdout=False, stderr=True, name=f"audio-capture[{self.friendly_name}]"
             )
-            await proc.start()
+            
+            try:
+                await proc.start()
 
-            # Signal that capture has started
-            if not self._capture_started.is_set():
-                self._capture_started.set()
+                # Signal that capture has started
+                if not self._capture_started.is_set():
+                    self._capture_started.set()
 
-            # If the process exits (e.g. device disappears) – restart after cool-down
-            async for line in proc.iter_stderr():
-                self.logger.debug(line)
+                # Collect stderr output to understand what's failing
+                stderr_lines = []
+                async for line in proc.iter_stderr():
+                    stderr_lines.append(line)
+                    self.logger.warning("FFmpeg stderr: %s", line)
 
-            await proc.close(True)
+                # Wait for process to complete and get return code
+                return_code = await proc.wait()
+                
+                if return_code != 0:
+                    self.logger.error(
+                        "FFmpeg process failed with return code %s. stderr output: %s",
+                        return_code,
+                        "\n".join(stderr_lines[-10:])  # Last 10 lines
+                    )
+                    
+                    # Check if it's a device issue
+                    stderr_text = "\n".join(stderr_lines)
+                    if "No such file or directory" in stderr_text or "Device or resource busy" in stderr_text:
+                        self.logger.error("Audio device '%s' not available or busy", self.device)
+                        break  # Don't retry for device issues
+                    
+                await proc.close(True)
+                
+            except Exception as err:
+                self.logger.error("Exception in capture process: %s", err)
+                with suppress(Exception):
+                    await proc.close(True)
+            
             if self._stop_called:
                 break
-            self.logger.warning("Capture process stopped unexpectedly – retrying in 5 s…")
-            await asyncio.sleep(5)
+                
+            retry_count += 1
+            if retry_count < max_retries:
+                self.logger.warning("Capture process stopped unexpectedly – retrying in 5 s… (attempt %d/%d)", retry_count + 1, max_retries)
+                await asyncio.sleep(5)
+            else:
+                self.logger.error("Max retries reached, stopping capture daemon")
+                break
 
         # Final clean-up
         await self._cleanup_pipe()
