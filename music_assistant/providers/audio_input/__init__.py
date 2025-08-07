@@ -49,15 +49,13 @@ if TYPE_CHECKING:
 # CONFIG KEYS
 # ------------------------------------------------------------------
 
-CONF_INPUT_DEVICE = "input_device"            # e.g. "pulse:bluez_source.XX_XX"
+CONF_INPUT_DEVICE = "input_device"            # e.g. "alsa:hw:1,0"
 CONF_SAMPLE_RATE = "sample_rate"             # int (Hz)
 CONF_CHANNELS = "channels"                 # 1 or 2
 CONF_FRIENDLY_NAME = "friendly_name"           # UI label
-CONF_BACKEND = "backend"                 # ffmpeg avdevice (pulse|jack|lavfi...)
 
 DEFAULT_SR = 48000
 DEFAULT_CHANNELS = 2
-DEFAULT_BACKEND = "pulse"
 
 # ------------------------------------------------------------------
 # PROVIDER SET-UP / CONFIG DIALOG
@@ -93,18 +91,6 @@ async def get_config_entries(
             required=True,
         ),
         ConfigEntry(
-            key=CONF_BACKEND,
-            type=ConfigEntryType.STRING,
-            label="FFmpeg avdevice backend",
-            options=[  # extend as needed
-                ConfigValueOption("PulseAudio / PipeWire", "pulse"),
-                ConfigValueOption("JACK", "jack"),
-                ConfigValueOption("Other (manual)", "custom"),
-            ],
-            default_value=DEFAULT_BACKEND,
-            required=True,
-        ),
-        ConfigEntry(
             key=CONF_SAMPLE_RATE,
             type=ConfigEntryType.INTEGER,
             label="Sample rate (Hz)",
@@ -133,11 +119,11 @@ async def _get_available_input_devices() -> list[ConfigValueOption]:
     """Scan for available audio input devices."""
     devices = []
     
-    # Try PulseAudio/PipeWire sources first
+    # Try ALSA devices first
     try:
-        pulse_devices = await _get_pulse_sources()
-        devices.extend(pulse_devices)
-    except Exception as err:
+        alsa_devices = await _get_alsa_devices()
+        devices.extend(alsa_devices)
+    except Exception:
         # Log but don't fail
         pass
     
@@ -145,7 +131,7 @@ async def _get_available_input_devices() -> list[ConfigValueOption]:
     try:
         jack_devices = await _get_jack_sources()
         devices.extend(jack_devices)
-    except Exception as err:
+    except Exception:
         # Log but don't fail
         pass
     
@@ -153,53 +139,43 @@ async def _get_available_input_devices() -> list[ConfigValueOption]:
     if not devices:
         devices = [
             ConfigValueOption("Default Audio Input", "default"),
-            ConfigValueOption("Manual Entry (pulse:device_name)", "pulse:"),
+            ConfigValueOption("Manual Entry (alsa:hw:X,Y)", "alsa:"),
             ConfigValueOption("Manual Entry (jack:port_name)", "jack:"),
         ]
     
     return devices
 
 
-async def _get_pulse_sources() -> list[ConfigValueOption]:
-    """Get PulseAudio/PipeWire source devices."""
+async def _get_alsa_devices() -> list[ConfigValueOption]:
+    """Get ALSA capture devices."""
     devices = []
     
     try:
-        # Use pactl to list sources
-        returncode, output = await check_output("pactl", "list", "short", "sources")
+        # Use arecord to list capture devices
+        returncode, output = await check_output("arecord", "-l")
         if returncode == 0:
             lines = output.decode('utf-8').strip().split('\n')
             for line in lines:
-                if line.strip():
-                    parts = line.split('\t')
-                    if len(parts) >= 2:
-                        source_name = parts[1]
-                        # Skip monitor sources (they're outputs, not inputs)
-                        if '.monitor' not in source_name:
-                            # Get friendly name if possible
-                            try:
-                                returncode2, desc_output = await check_output(
-                                    "pactl", "list", "sources"
-                                )
-                                if returncode2 == 0:
-                                    desc_text = desc_output.decode('utf-8')
-                                    # Extract description for this source
-                                    friendly_name = _extract_pulse_description(desc_text, source_name)
-                                    if friendly_name:
-                                        display_name = f"{friendly_name} ({source_name})"
-                                    else:
-                                        display_name = source_name
-                                else:
-                                    display_name = source_name
-                            except Exception:
-                                display_name = source_name
+                if 'card' in line and 'device' in line:
+                    # Parse line like: "card 1: USB [USB Audio], device 0: USB Audio [USB Audio]"
+                    if 'card' in line and 'device' in line:
+                        try:
+                            # Extract card and device numbers
+                            card_part = line.split('card ')[1].split(':')[0]
+                            device_part = line.split('device ')[1].split(':')[0]
+                            
+                            # Extract friendly name
+                            name_part = line.split(': ')[1] if ': ' in line else f"Card {card_part} Device {device_part}"
                             
                             devices.append(ConfigValueOption(
-                                display_name,
-                                f"pulse:{source_name}"
+                                f"ALSA: {name_part}",
+                                f"alsa:hw:{card_part},{device_part}"
                             ))
+                        except (IndexError, ValueError):
+                            # Skip malformed lines
+                            continue
     except Exception:
-        # pactl not available or failed
+        # arecord not available or failed
         pass
     
     return devices
@@ -260,21 +236,6 @@ async def _get_jack_sources() -> list[ConfigValueOption]:
     return devices
 
 
-def _extract_pulse_description(pactl_output: str, source_name: str) -> str | None:
-    """Extract friendly description from pactl list sources output."""
-    lines = pactl_output.split('\n')
-    in_source = False
-    
-    for line in lines:
-        if f"Name: {source_name}" in line:
-            in_source = True
-        elif in_source and line.startswith('Source #'):
-            in_source = False
-        elif in_source and 'Description:' in line:
-            desc = line.split('Description:', 1)[1].strip()
-            return desc
-    
-    return None
 
 # ------------------------------------------------------------------
 # PROVIDER IMPLEMENTATION
@@ -294,10 +255,12 @@ class AudioInputProvider(PluginProvider):
 
         # Resolve config
         self.device: str = cast(str, self.config.get_value(CONF_INPUT_DEVICE))
-        self.backend: str = cast(str, self.config.get_value(CONF_BACKEND))
         self.sample_rate: int = cast(int, self.config.get_value(CONF_SAMPLE_RATE))
         self.channels: int = cast(int, self.config.get_value(CONF_CHANNELS))
         self.friendly_name: str = cast(str, self.config.get_value(CONF_FRIENDLY_NAME))
+        
+        # Parse device string to determine format and device
+        self.ffmpeg_format, self.ffmpeg_device = self._parse_device_string(self.device)
 
         # Runtime helpers
         self.cache_dir = os.path.join(self.mass.cache_path, self.instance_id)
@@ -358,6 +321,21 @@ class AudioInputProvider(PluginProvider):
 
     # ---------------- Internals ----------------
 
+    def _parse_device_string(self, device: str) -> tuple[str, str]:
+        """Parse device string to determine FFmpeg format and device."""
+        if device.startswith("pulse:"):
+            # PulseAudio - but FFmpeg might not support it, try ALSA instead
+            return "alsa", "default"
+        elif device.startswith("jack:"):
+            return "jack", device[5:]  # Remove "jack:" prefix
+        elif device.startswith("alsa:"):
+            return "alsa", device[5:]  # Remove "alsa:" prefix
+        elif device == "default":
+            return "alsa", "default"
+        else:
+            # Assume ALSA format
+            return "alsa", device
+
     def _start_capture_daemon(self) -> None:
         if self._runner_task and not self._runner_task.done():
             return  # already running
@@ -394,9 +372,9 @@ class AudioInputProvider(PluginProvider):
             "-loglevel",
             "warning",  # Changed from "error" to get more info
             "-f",
-            self.backend,
+            self.ffmpeg_format,
             "-i",
-            self.device,
+            self.ffmpeg_device,
             "-ac",
             str(self.channels),
             "-ar",
