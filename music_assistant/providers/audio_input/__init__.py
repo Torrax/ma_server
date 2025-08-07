@@ -301,7 +301,6 @@ class AudioInputProvider(PluginProvider):
                 )
             else:
                 # Relative path - resolve relative to provider directory
-                import os
                 provider_dir = os.path.dirname(__file__)
                 image_path = os.path.join(provider_dir, self.thumbnail_image)
                 
