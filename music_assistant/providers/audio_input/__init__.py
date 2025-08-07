@@ -84,6 +84,22 @@ async def get_config_entries(
     return (
         CONF_ENTRY_WARN_PREVIEW,
         ConfigEntry(
+            key=CONF_FRIENDLY_NAME,
+            type=ConfigEntryType.STRING,
+            label="Display Name",
+            default_value="Bluetooth Input",
+            required=True,
+        ),
+        ConfigEntry(
+            key=CONF_THUMBNAIL_IMAGE,
+            type=ConfigEntryType.STRING,
+            label="Thumbnail Image",
+            description="Path to image file (relative to provider directory) or direct URL to SVG/image file. "
+                       "Examples: 'images/bluetooth.svg' or 'https://example.com/icon.svg'",
+            default_value="",
+            required=False,
+        ),
+        ConfigEntry(
             key=CONF_INPUT_DEVICE,
             type=ConfigEntryType.STRING,
             label="Audio Input Device",
@@ -106,22 +122,6 @@ async def get_config_entries(
             default_value=DEFAULT_CHANNELS,
             required=True,
             options=[ConfigValueOption("Mono", 1), ConfigValueOption("Stereo", 2)],
-        ),
-        ConfigEntry(
-            key=CONF_FRIENDLY_NAME,
-            type=ConfigEntryType.STRING,
-            label="Display name in UI",
-            default_value="Bluetooth Input",
-            required=True,
-        ),
-        ConfigEntry(
-            key=CONF_THUMBNAIL_IMAGE,
-            type=ConfigEntryType.STRING,
-            label="Thumbnail Image",
-            description="Path to image file (relative to provider directory) or direct URL to SVG/image file. "
-                       "Examples: 'images/bluetooth.svg' or 'https://example.com/icon.svg'",
-            default_value="",
-            required=False,
         ),
     )
 
@@ -345,14 +345,34 @@ class AudioInputProvider(PluginProvider):
 
     async def unload(self, is_removed: bool = False) -> None:
         """Tear down."""
+        self.logger.info("Unloading audio input provider %s", self.friendly_name)
         self._stop_called = True
+        
+        # Stop the capture process first
+        if self._capture_proc and not self._capture_proc.closed:
+            self.logger.info("Terminating capture process for %s", self.friendly_name)
+            try:
+                await self._capture_proc.close(True)  # Force kill
+            except Exception as err:
+                self.logger.warning("Error stopping capture process: %s", err)
+        
+        # Cancel the runner task
         if self._runner_task and not self._runner_task.done():
             self._runner_task.cancel()
             with suppress(asyncio.CancelledError):
                 await self._runner_task
+        
+        # Unregister callbacks
         for cb in self._on_unload_callbacks:
-            cb()
+            try:
+                cb()
+            except Exception as err:
+                self.logger.warning("Error during callback cleanup: %s", err)
+        
+        # Clean up the named pipe
         await self._cleanup_pipe()
+        
+        self.logger.info("Audio input provider %s unloaded successfully", self.friendly_name)
 
     # ---------------- PluginProvider hooks ----------------
 
@@ -490,11 +510,16 @@ class AudioInputProvider(PluginProvider):
                 async for line in proc.iter_stderr():
                     stderr_lines.append(line)
                     # Only log actual errors, not normal operational messages
-                    if any(error_keyword in line.lower() for error_keyword in ['error', 'failed', 'cannot', 'unable']):
-                        self.logger.warning("Capture stderr: %s", line)
+                    if "broken pipe" in line.lower():
+                        # Broken pipe is normal when no player is reading the stream
+                        self.logger.debug("Broken pipe (normal when no player is reading): %s", line)
                     elif "overrun" in line.lower():
                         # Overruns are normal when no one is reading the stream
                         self.logger.debug("Audio buffer overrun (normal when stream not active): %s", line)
+                    elif any(error_keyword in line.lower() for error_keyword in ['error', 'failed', 'cannot', 'unable']):
+                        # Only log actual errors that aren't broken pipe related
+                        if "broken pipe" not in line.lower():
+                            self.logger.warning("Capture stderr: %s", line)
                     else:
                         # Log other messages at debug level
                         self.logger.debug("Capture info: %s", line)
