@@ -375,9 +375,6 @@ class LocalAudioSourceProvider(MusicProvider):
         """Call after the provider has been loaded."""
         await super().loaded_in_mass()
         
-        # Update the provider instance name to match the custom name
-        await self._update_provider_name()
-        
         # Auto-start capturing if configured
         if self.config.get_value(CONF_AUTO_START):
             await self._start_capture()
@@ -660,25 +657,6 @@ class LocalAudioSourceProvider(MusicProvider):
             except Exception as err:
                 self.logger.error("Error in capture monitor: %s", err)
                 await asyncio.sleep(5)
-
-    async def _update_provider_name(self) -> None:
-        """Update the provider instance name to match the custom name."""
-        try:
-            # Get the custom name from config
-            custom_name = self.config.get_value(CONF_CUSTOM_NAME)
-            if custom_name and custom_name.strip():
-                # Update the provider instance name in Music Assistant
-                if hasattr(self.mass.config, 'update_provider_config'):
-                    # Get current provider config
-                    current_config = await self.mass.config.get_provider_config(self.instance_id)
-                    if current_config:
-                        # Update the name field
-                        current_config.name = custom_name
-                        # Save the updated config
-                        await self.mass.config.update_provider_config(self.instance_id, current_config)
-                        self.logger.info("Updated provider instance name to: %s", custom_name)
-        except Exception as err:
-            self.logger.warning("Failed to update provider name: %s", err)
 
     async def _find_image_file(self, image_name: str) -> str:
         """Find the actual image file based on the user input (case-insensitive)."""
