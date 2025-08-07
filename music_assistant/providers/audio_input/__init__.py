@@ -297,11 +297,16 @@ class AudioInputProvider(PluginProvider):
                 self.logger.info("Using direct URL for image: %s", self.thumbnail_image)
                 metadata.image_url = self.thumbnail_image
             else:
-                # For local files, create a web-accessible URL through MA's image system
-                self.logger.info("Creating web-accessible URL for local file: %s", self.thumbnail_image)
-                # Create a URL that will be handled by the resolve_image method
-                metadata.image_url = f"/api/providers/{self.instance_id}/image/{self.thumbnail_image}"
-                self.logger.info("Set image_url to: %s", metadata.image_url)
+                # For local files, create a MediaItemImage that will be resolved by our resolve_image method
+                self.logger.info("Creating MediaItemImage for local file: %s", self.thumbnail_image)
+                from music_assistant_models.media_items import MediaItemImage
+                metadata.images = [MediaItemImage(
+                    type=ImageType.THUMB,
+                    path=self.thumbnail_image,
+                    provider=self.domain,  # Use domain, not instance_id
+                    remotely_accessible=False,
+                )]
+                self.logger.info("Created MediaItemImage: %s", metadata.images[0])
         
         self._source_details = PluginSource(
             id=self.instance_id,
