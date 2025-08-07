@@ -94,8 +94,8 @@ async def get_config_entries(
             key=CONF_THUMBNAIL_IMAGE,
             type=ConfigEntryType.STRING,
             label="Thumbnail Image",
-            description="Path to image file (relative to provider directory) or direct URL to SVG/image file. "
-                       "Examples: 'images/bluetooth.svg' or 'https://example.com/icon.svg'",
+            description="Direct URL to SVG/image file. "
+                       "Example: 'https://example.com/icon.svg'",
             default_value="",
             required=False,
         ),
@@ -281,37 +281,16 @@ class AudioInputProvider(PluginProvider):
         self._runner_task: asyncio.Task | None = None          # type: ignore[type-arg]
         self._stop_called = False
         self._capture_started = asyncio.Event()
-        self._on_unload_callbacks: list[Callable[..., None]] = [
-            # Register the image resolution endpoint
-            self.mass.streams.register_dynamic_route(
-                f"/api/providers/{self.instance_id}/resolve_image",
-                self._handle_resolve_image,
-            ),
-        ]
+        self._on_unload_callbacks: list[Callable[..., None]] = []
 
         # Static plugin-wide audio source definition
         metadata = PlayerMedia("Live Audio Input")
         
-        # Add thumbnail image if configured
-        if self.thumbnail_image:
-            # Determine if it's a URL or relative path
-            is_url = self.thumbnail_image.startswith(('http://', 'https://'))
-            
-            if is_url:
-                # Direct URL - use image_url for PlayerMedia
-                metadata.image_url = self.thumbnail_image
-            else:
-                # Relative path - resolve relative to provider directory
-                provider_dir = os.path.dirname(__file__)
-                image_path = os.path.join(provider_dir, self.thumbnail_image)
-                
-                # Check if file exists
-                if os.path.exists(image_path):
-                    # For local files, we need to create a URL that can be resolved
-                    # Use the provider's resolve_image method via the webserver
-                    metadata.image_url = f"/api/providers/{self.instance_id}/resolve_image?path={self.thumbnail_image}"
-                else:
-                    self.logger.warning("Thumbnail image not found: %s", image_path)
+        # Add thumbnail image if configured (URLs only)
+        if self.thumbnail_image and self.thumbnail_image.startswith(('http://', 'https://')):
+            metadata.image_url = self.thumbnail_image
+        elif self.thumbnail_image:
+            self.logger.warning("Only URLs are supported for thumbnail images. Ignoring: %s", self.thumbnail_image)
         
         self._source_details = PluginSource(
             id=self.instance_id,
@@ -390,51 +369,6 @@ class AudioInputProvider(PluginProvider):
         """Expose the capture device as a PlayerSource."""
         return self._source_details
 
-    async def resolve_image(self, path: str) -> str | bytes:
-        """
-        Resolve an image from an image path.
-
-        This either returns (a generator to get) raw bytes of the image or
-        a string with an http(s) URL or local path that is accessible from the server.
-        """
-        # For relative paths, resolve them relative to the provider directory
-        if not path.startswith(('http://', 'https://')):
-            provider_dir = os.path.dirname(__file__)
-            full_path = os.path.join(provider_dir, path)
-            if os.path.exists(full_path):
-                return full_path
-        
-        # For URLs or if file doesn't exist, return as-is
-        return path
-
-    async def _handle_resolve_image(self, request) -> bytes:
-        """Handle image resolution requests from the webserver."""
-        from aiohttp.web import Response
-        
-        # Get the path parameter from the query string
-        path = request.query.get('path', '')
-        if not path:
-            return Response(status=404, text="No path specified")
-        
-        try:
-            # Use the resolve_image method to get the file path
-            resolved_path = await self.resolve_image(path)
-            
-            if isinstance(resolved_path, str) and os.path.exists(resolved_path):
-                # Read and return the file
-                with open(resolved_path, 'rb') as f:
-                    content = f.read()
-                
-                # Determine content type based on file extension
-                content_type = "image/svg+xml" if resolved_path.endswith('.svg') else "image/png"
-                
-                return Response(body=content, content_type=content_type)
-            else:
-                return Response(status=404, text="Image not found")
-                
-        except Exception as err:
-            self.logger.error("Error serving image %s: %s", path, err)
-            return Response(status=500, text="Internal server error")
 
     # ---------------- Internals ----------------
 
