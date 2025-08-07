@@ -27,10 +27,11 @@ from music_assistant_models.config_entries import (
 from music_assistant_models.enums import (
     ContentType,
     EventType,
+    ImageType,
     ProviderFeature,
     StreamType,
 )
-from music_assistant_models.media_items import AudioFormat
+from music_assistant_models.media_items import AudioFormat, MediaItemImage
 from music_assistant_models.player import PlayerMedia
 
 from music_assistant.constants import CONF_ENTRY_WARN_PREVIEW
@@ -53,6 +54,7 @@ CONF_INPUT_DEVICE = "input_device"            # e.g. "alsa:hw:1,0"
 CONF_SAMPLE_RATE = "sample_rate"             # int (Hz)
 CONF_CHANNELS = "channels"                 # 1 or 2
 CONF_FRIENDLY_NAME = "friendly_name"           # UI label
+CONF_THUMBNAIL_IMAGE = "thumbnail_image"       # Image path/URL
 
 DEFAULT_SR = 48000
 DEFAULT_CHANNELS = 2
@@ -111,6 +113,15 @@ async def get_config_entries(
             label="Display name in UI",
             default_value="Bluetooth Input",
             required=True,
+        ),
+        ConfigEntry(
+            key=CONF_THUMBNAIL_IMAGE,
+            type=ConfigEntryType.STRING,
+            label="Thumbnail Image",
+            description="Path to image file (relative to provider directory) or direct URL to SVG/image file. "
+                       "Examples: 'images/bluetooth.svg' or 'https://example.com/icon.svg'",
+            default_value="",
+            required=False,
         ),
     )
 
@@ -258,6 +269,7 @@ class AudioInputProvider(PluginProvider):
         self.sample_rate: int = cast(int, self.config.get_value(CONF_SAMPLE_RATE))
         self.channels: int = cast(int, self.config.get_value(CONF_CHANNELS))
         self.friendly_name: str = cast(str, self.config.get_value(CONF_FRIENDLY_NAME))
+        self.thumbnail_image: str = cast(str, self.config.get_value(CONF_THUMBNAIL_IMAGE) or "")
         
         # Parse device string to determine format and device
         self.ffmpeg_format, self.ffmpeg_device = self._parse_device_string(self.device)
@@ -272,6 +284,38 @@ class AudioInputProvider(PluginProvider):
         self._on_unload_callbacks: list[Callable[..., None]] = []
 
         # Static plugin-wide audio source definition
+        metadata = PlayerMedia("Live Audio Input")
+        
+        # Add thumbnail image if configured
+        if self.thumbnail_image:
+            # Determine if it's a URL or relative path
+            is_url = self.thumbnail_image.startswith(('http://', 'https://'))
+            
+            if is_url:
+                # Direct URL
+                metadata.image = MediaItemImage(
+                    type=ImageType.THUMB,
+                    path=self.thumbnail_image,
+                    provider=self.lookup_key,
+                    remotely_accessible=True,
+                )
+            else:
+                # Relative path - resolve relative to provider directory
+                import os
+                provider_dir = os.path.dirname(__file__)
+                image_path = os.path.join(provider_dir, self.thumbnail_image)
+                
+                # Check if file exists
+                if os.path.exists(image_path):
+                    metadata.image = MediaItemImage(
+                        type=ImageType.THUMB,
+                        path=self.thumbnail_image,  # Store relative path
+                        provider=self.lookup_key,
+                        remotely_accessible=False,
+                    )
+                else:
+                    self.logger.warning("Thumbnail image not found: %s", image_path)
+        
         self._source_details = PluginSource(
             id=self.instance_id,
             name=self.friendly_name,
@@ -286,7 +330,7 @@ class AudioInputProvider(PluginProvider):
                 bit_depth=16,
                 channels=self.channels,
             ),
-            metadata=PlayerMedia("Live Audio Input"),
+            metadata=metadata,
             stream_type=StreamType.NAMED_PIPE,
             path=self.named_pipe,
         )
@@ -318,6 +362,23 @@ class AudioInputProvider(PluginProvider):
     def get_source(self) -> PluginSource:
         """Expose the capture device as a PlayerSource."""
         return self._source_details
+
+    async def resolve_image(self, path: str) -> str | bytes:
+        """
+        Resolve an image from an image path.
+
+        This either returns (a generator to get) raw bytes of the image or
+        a string with an http(s) URL or local path that is accessible from the server.
+        """
+        # For relative paths, resolve them relative to the provider directory
+        if not path.startswith(('http://', 'https://')):
+            provider_dir = os.path.dirname(__file__)
+            full_path = os.path.join(provider_dir, path)
+            if os.path.exists(full_path):
+                return full_path
+        
+        # For URLs or if file doesn't exist, return as-is
+        return path
 
     # ---------------- Internals ----------------
 
