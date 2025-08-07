@@ -396,9 +396,11 @@ class LocalAudioSourceProvider(MusicProvider):
         custom_image = self.config.get_value(CONF_CUSTOM_IMAGE)
         if not custom_image or custom_image.strip() == "":
             image_path = "icon.svg"
+            is_remote_url = False
         else:
-            # Dynamically find the image file in the images folder
+            # Dynamically find the image file in the images folder or handle URL
             image_path = await self._find_image_file(custom_image)
+            is_remote_url = image_path.startswith(("http://", "https://"))
         
         # Create unique radio item ID for this instance to prevent name conflicts
         unique_radio_id = f"{AUDIO_SOURCE_ID}_{self.instance_id}"
@@ -428,8 +430,8 @@ class LocalAudioSourceProvider(MusicProvider):
                     MediaItemImage(
                         type=ImageType.THUMB,
                         path=image_path,
-                        provider=self.domain,
-                        remotely_accessible=False,
+                        provider=self.domain if not is_remote_url else None,
+                        remotely_accessible=is_remote_url,
                     )
                 ]),
             ),
@@ -714,13 +716,13 @@ class LocalAudioSourceProvider(MusicProvider):
         provider_dir = os.path.dirname(__file__)
         
         # Handle custom images from the images folder (any image file)
-        if not path.endswith(("icon.svg", "icon_monochrome.svg")):
+        if path != "icon.svg":
             image_path = os.path.join(provider_dir, "images", path)
             if os.path.exists(image_path):
                 return image_path
         
-        # Handle default provider icons
-        if path in ("icon.svg", "icon_monochrome.svg"):
+        # Handle default provider icon
+        if path == "icon.svg":
             icon_path = os.path.join(provider_dir, path)
             if os.path.exists(icon_path):
                 return icon_path
