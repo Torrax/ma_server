@@ -408,7 +408,7 @@ class LocalAudioSourceProvider(MusicProvider):
         # Return the local audio input as a radio station
         yield Radio(
             item_id=audio_source_id,
-            provider=self.domain,
+            provider=self.lookup_key,
             name=custom_name,
             provider_mappings={
                 ProviderMapping(
