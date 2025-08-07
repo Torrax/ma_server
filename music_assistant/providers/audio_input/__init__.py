@@ -297,16 +297,20 @@ class AudioInputProvider(PluginProvider):
                 self.logger.info("Using direct URL for image: %s", self.thumbnail_image)
                 metadata.image_url = self.thumbnail_image
             else:
-                # For local files, create a MediaItemImage with the provider reference
-                self.logger.info("Creating MediaItemImage for local file: %s (provider: %s, instance: %s)", self.thumbnail_image, self.domain, self.instance_id)
-                from music_assistant_models.media_items import MediaItemImage
-                metadata.images = [MediaItemImage(
-                    type=ImageType.THUMB,
-                    path=self.thumbnail_image,
-                    provider=self.instance_id,
-                    remotely_accessible=False,
-                )]
-                self.logger.info("Created MediaItemImage: %s", metadata.images[0])
+                # For local files, resolve the path immediately and set as image_url
+                self.logger.info("Resolving local image path: %s", self.thumbnail_image)
+                try:
+                    # Resolve the image path immediately
+                    provider_dir = os.path.dirname(__file__)
+                    full_path = os.path.join(provider_dir, self.thumbnail_image)
+                    
+                    if os.path.exists(full_path):
+                        self.logger.info("Setting image_url to resolved path: %s", full_path)
+                        metadata.image_url = f"file://{full_path}"
+                    else:
+                        self.logger.warning("Image file not found: %s", full_path)
+                except Exception as err:
+                    self.logger.error("Failed to resolve image path: %s", err)
         
         self._source_details = PluginSource(
             id=self.instance_id,
