@@ -399,14 +399,17 @@ class LocalAudioSourceProvider(MusicProvider):
             # Dynamically find the image file in the images folder
             image_path = await self._find_image_file(custom_image)
         
+        # Create unique radio item ID for this instance to prevent name conflicts
+        unique_radio_id = f"{AUDIO_SOURCE_ID}_{self.instance_id}"
+        
         # Return the local audio input as a radio station
         yield Radio(
-            item_id=AUDIO_SOURCE_ID,
+            item_id=unique_radio_id,
             provider=self.instance_id,
             name=custom_name,
             provider_mappings={
                 ProviderMapping(
-                    item_id=AUDIO_SOURCE_ID,
+                    item_id=unique_radio_id,
                     provider_domain=self.domain,
                     provider_instance=self.instance_id,
                     available=True,
@@ -433,7 +436,9 @@ class LocalAudioSourceProvider(MusicProvider):
 
     async def get_radio(self, prov_radio_id: str) -> Radio:
         """Get full radio details by id."""
-        if prov_radio_id != AUDIO_SOURCE_ID:
+        # Check if this is our unique radio ID for this instance
+        expected_id = f"{AUDIO_SOURCE_ID}_{self.instance_id}"
+        if prov_radio_id != expected_id:
             raise MediaNotFoundError(f"Radio {prov_radio_id} not found")
         
         # Return the radio from the library
@@ -445,7 +450,9 @@ class LocalAudioSourceProvider(MusicProvider):
 
     async def get_stream_details(self, item_id: str, media_type: MediaType) -> StreamDetails:
         """Get streamdetails for a track/radio."""
-        if item_id != AUDIO_SOURCE_ID:
+        # Check if this is our unique radio ID for this instance
+        expected_id = f"{AUDIO_SOURCE_ID}_{self.instance_id}"
+        if item_id != expected_id:
             raise MediaNotFoundError(f"Item {item_id} not found")
         
         sample_rate = self.config.get_value(CONF_SAMPLE_RATE)
@@ -470,7 +477,9 @@ class LocalAudioSourceProvider(MusicProvider):
         self, streamdetails: StreamDetails, seek_position: int = 0
     ) -> AsyncGenerator[bytes, None]:
         """Return the audio stream for the local audio source."""
-        if streamdetails.item_id != AUDIO_SOURCE_ID:
+        # Check if this is our unique radio ID for this instance
+        expected_id = f"{AUDIO_SOURCE_ID}_{self.instance_id}"
+        if streamdetails.item_id != expected_id:
             raise MediaNotFoundError(f"Item {streamdetails.item_id} not found")
         
         # Create a new capture process for each stream to avoid concurrency issues
