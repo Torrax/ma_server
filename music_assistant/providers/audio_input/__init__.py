@@ -292,13 +292,8 @@ class AudioInputProvider(PluginProvider):
             is_url = self.thumbnail_image.startswith(('http://', 'https://'))
             
             if is_url:
-                # Direct URL
-                metadata.image = MediaItemImage(
-                    type=ImageType.THUMB,
-                    path=self.thumbnail_image,
-                    provider=self.lookup_key,
-                    remotely_accessible=True,
-                )
+                # Direct URL - use image_url for PlayerMedia
+                metadata.image_url = self.thumbnail_image
             else:
                 # Relative path - resolve relative to provider directory
                 provider_dir = os.path.dirname(__file__)
@@ -306,12 +301,9 @@ class AudioInputProvider(PluginProvider):
                 
                 # Check if file exists
                 if os.path.exists(image_path):
-                    metadata.image = MediaItemImage(
-                        type=ImageType.THUMB,
-                        path=self.thumbnail_image,  # Store relative path
-                        provider=self.lookup_key,
-                        remotely_accessible=False,
-                    )
+                    # For local files, we need to create a URL that can be resolved
+                    # Use the provider's resolve_image method via the webserver
+                    metadata.image_url = f"/api/providers/{self.instance_id}/resolve_image?path={self.thumbnail_image}"
                 else:
                     self.logger.warning("Thumbnail image not found: %s", image_path)
         
