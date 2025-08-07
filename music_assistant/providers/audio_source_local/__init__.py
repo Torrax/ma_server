@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     from music_assistant.models import ProviderInstanceType
 
 
-# We'll generate unique IDs per instance instead of using a static ID
+AUDIO_SOURCE_ID = "audio_source_local"
 DEFAULT_SAMPLE_RATE = 44100
 DEFAULT_CHANNELS = 2
 DEFAULT_BIT_DEPTH = 16
@@ -375,6 +375,9 @@ class LocalAudioSourceProvider(MusicProvider):
         """Call after the provider has been loaded."""
         await super().loaded_in_mass()
         
+        # Update the provider instance name to match the custom name
+        await self._update_provider_name()
+        
         # Auto-start capturing if configured
         if self.config.get_value(CONF_AUTO_START):
             await self._start_capture()
@@ -399,17 +402,14 @@ class LocalAudioSourceProvider(MusicProvider):
             # Dynamically find the image file in the images folder
             image_path = await self._find_image_file(custom_image)
         
-        # Use instance ID to create unique radio item ID for each provider instance
-        audio_source_id = f"audio_source_{self.instance_id}"
-        
         # Return the local audio input as a radio station
         yield Radio(
-            item_id=audio_source_id,
+            item_id=AUDIO_SOURCE_ID,
             provider=self.instance_id,
             name=custom_name,
             provider_mappings={
                 ProviderMapping(
-                    item_id=audio_source_id,
+                    item_id=AUDIO_SOURCE_ID,
                     provider_domain=self.domain,
                     provider_instance=self.instance_id,
                     available=True,
@@ -436,9 +436,7 @@ class LocalAudioSourceProvider(MusicProvider):
 
     async def get_radio(self, prov_radio_id: str) -> Radio:
         """Get full radio details by id."""
-        # Check if this is our audio source ID for this instance
-        expected_id = f"audio_source_{self.instance_id}"
-        if prov_radio_id != expected_id:
+        if prov_radio_id != AUDIO_SOURCE_ID:
             raise MediaNotFoundError(f"Radio {prov_radio_id} not found")
         
         # Return the radio from the library
@@ -450,9 +448,7 @@ class LocalAudioSourceProvider(MusicProvider):
 
     async def get_stream_details(self, item_id: str, media_type: MediaType) -> StreamDetails:
         """Get streamdetails for a track/radio."""
-        # Check if this is our audio source ID for this instance
-        expected_id = f"audio_source_{self.instance_id}"
-        if item_id != expected_id:
+        if item_id != AUDIO_SOURCE_ID:
             raise MediaNotFoundError(f"Item {item_id} not found")
         
         sample_rate = self.config.get_value(CONF_SAMPLE_RATE)
@@ -477,9 +473,7 @@ class LocalAudioSourceProvider(MusicProvider):
         self, streamdetails: StreamDetails, seek_position: int = 0
     ) -> AsyncGenerator[bytes, None]:
         """Return the audio stream for the local audio source."""
-        # Check if this is our audio source ID for this instance
-        expected_id = f"audio_source_{self.instance_id}"
-        if streamdetails.item_id != expected_id:
+        if streamdetails.item_id != AUDIO_SOURCE_ID:
             raise MediaNotFoundError(f"Item {streamdetails.item_id} not found")
         
         # Create a new capture process for each stream to avoid concurrency issues
@@ -666,6 +660,25 @@ class LocalAudioSourceProvider(MusicProvider):
             except Exception as err:
                 self.logger.error("Error in capture monitor: %s", err)
                 await asyncio.sleep(5)
+
+    async def _update_provider_name(self) -> None:
+        """Update the provider instance name to match the custom name."""
+        try:
+            # Get the custom name from config
+            custom_name = self.config.get_value(CONF_CUSTOM_NAME)
+            if custom_name and custom_name.strip():
+                # Update the provider instance name in Music Assistant
+                if hasattr(self.mass.config, 'update_provider_config'):
+                    # Get current provider config
+                    current_config = await self.mass.config.get_provider_config(self.instance_id)
+                    if current_config:
+                        # Update the name field
+                        current_config.name = custom_name
+                        # Save the updated config
+                        await self.mass.config.update_provider_config(self.instance_id, current_config)
+                        self.logger.info("Updated provider instance name to: %s", custom_name)
+        except Exception as err:
+            self.logger.warning("Failed to update provider name: %s", err)
 
     async def _find_image_file(self, image_name: str) -> str:
         """Find the actual image file based on the user input (case-insensitive)."""
