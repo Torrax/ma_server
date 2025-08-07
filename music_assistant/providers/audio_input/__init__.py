@@ -2,11 +2,11 @@
 Live-Audio-Input plugin (player-selectable version)
 ==================================================
 
-Streams realtime PCM from a user-chosen PulseAudio / PipeWire / JACK /
-(other FFmpeg device) capture source into *whichever Music-Assistant
-player* requests it in the web UI.
+Streams realtime PCM from a user-chosen PulseAudio/PipeWire/JACK
+(or any FFmpeg avdevice) capture source into *whichever Music-Assistant
+player* selects it in the UI.
 
-No ALSA / arecord binaries are used – capture is done directly via FFmpeg.
+No ALSA/arecord binaries are used – capture is done directly by FFmpeg.
 
 Author: you (@yourgithubusername)
 """
@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, cast
 from music_assistant_models.config_entries import (
     ConfigEntry,
     ConfigEntryType,
+    ConfigValueOption,
 )
 from music_assistant_models.enums import ContentType, ProviderFeature, StreamType
 from music_assistant_models.media_items import AudioFormat
@@ -28,7 +29,7 @@ from music_assistant_models.player import PlayerMedia
 from music_assistant.helpers.process import AsyncProcess
 from music_assistant.models.plugin import PluginProvider, PluginSource
 
-if TYPE_CHECKING:
+if TYPE_CHECKING:  # pragma: no cover
     from music_assistant_models.config_entries import ConfigValueType, ProviderConfig
     from music_assistant_models.provider import ProviderManifest
     from music_assistant.mass import MusicAssistant
@@ -37,32 +38,32 @@ if TYPE_CHECKING:
 # ────────────────────────────────────────────────────────────────
 # Config keys / defaults
 # ────────────────────────────────────────────────────────────────
-CONF_INPUT_DEVICE  = "input_device"   # FFmpeg device string (pulse:…, jack:…)
-CONF_SAMPLE_RATE   = "sample_rate"
-CONF_CHANNELS      = "channels"
-CONF_FRIENDLY_NAME = "friendly_name"
-CONF_BACKEND       = "backend"
+CONF_INPUT_DEVICE: str = "input_device"   # FFmpeg device string, e.g. pulse:bluez_source.…
+CONF_SAMPLE_RATE: str = "sample_rate"
+CONF_CHANNELS: str = "channels"
+CONF_FRIENDLY_NAME: str = "friendly_name"
+CONF_BACKEND: str = "backend"
 
-DEFAULT_SR       = 48_000
-DEFAULT_CHANNELS = 2
-DEFAULT_BACKEND  = "pulse"
+DEFAULT_SR: int = 48_000
+DEFAULT_CHANNELS: int = 2
+DEFAULT_BACKEND: str = "pulse"
 
 
 # ────────────────────────────────────────────────────────────────
 # Plugin bootstrap helpers
 # ────────────────────────────────────────────────────────────────
 async def setup(
-    mass: MusicAssistant, manifest: ProviderManifest, config: ProviderConfig
-) -> ProviderInstanceType:  # noqa: D401
+    mass: MusicAssistant, manifest: "ProviderManifest", config: "ProviderConfig"
+) -> "ProviderInstanceType":
     """Instantiate provider."""
     return AudioInputProvider(mass, manifest, config)
 
 
-async def get_config_entries(  # noqa: D401
-    mass: MusicAssistant,
-    instance_id: str | None = None,  # noqa: ARG001
-    action: str | None = None,       # noqa: ARG001
-    values: dict[str, ConfigValueType] | None = None,  # noqa: ARG001
+async def get_config_entries(
+    mass: MusicAssistant,                       # noqa: ARG001
+    instance_id: str | None = None,             # noqa: ARG001
+    action: str | None = None,                  # noqa: ARG001
+    values: dict[str, "ConfigValueType"] | None = None,  # noqa: ARG001
 ) -> tuple[ConfigEntry, ...]:
     """Wizard: ask only for capture parameters."""
     return (
@@ -70,7 +71,10 @@ async def get_config_entries(  # noqa: D401
             key=CONF_INPUT_DEVICE,
             type=ConfigEntryType.STRING,
             label="Capture device (FFmpeg syntax)",
-            description="Pulse example: pulse:bluez_source.XX_XX…   JACK: jack:system:capture_1",
+            description=(
+                "Pulse example: pulse:bluez_source.12_34_56_78_9A_BC  "
+                "│  JACK: jack:system:capture_1|system:capture_2"
+            ),
             default_value="default",
             required=True,
         ),
@@ -81,15 +85,15 @@ async def get_config_entries(  # noqa: D401
             default_value=DEFAULT_BACKEND,
             required=True,
             options=[
-                {"title": "PulseAudio / PipeWire", "value": "pulse"},
-                {"title": "JACK", "value": "jack"},
-                {"title": "Other (manual)", "value": "custom"},
+                ConfigValueOption("PulseAudio / PipeWire", "pulse"),
+                ConfigValueOption("JACK", "jack"),
+                ConfigValueOption("Other (manual)", "custom"),
             ],
         ),
         ConfigEntry(
             key=CONF_SAMPLE_RATE,
             type=ConfigEntryType.INTEGER,
-            label="Sample rate",
+            label="Sample rate (Hz)",
             default_value=DEFAULT_SR,
             required=True,
         ),
@@ -99,6 +103,10 @@ async def get_config_entries(  # noqa: D401
             label="Channels",
             default_value=DEFAULT_CHANNELS,
             required=True,
+            options=[
+                ConfigValueOption("Mono", 1),
+                ConfigValueOption("Stereo", 2),
+            ],
         ),
         ConfigEntry(
             key=CONF_FRIENDLY_NAME,
@@ -113,32 +121,29 @@ async def get_config_entries(  # noqa: D401
 # ────────────────────────────────────────────────────────────────
 # Provider implementation
 # ────────────────────────────────────────────────────────────────
-class AudioInputProvider(PluginProvider):  # noqa: D101
-    #
-    # MA calls get_source() once at load-time; players can then pick
-    # it in the UI and MA will call get_audio_stream(player_id) each
-    # time a *specific* player starts/stops using it.
-    #
+class AudioInputProvider(PluginProvider):
+    """Realtime audio-capture provider selectable by any player."""
+
     def __init__(
         self,
         mass: MusicAssistant,
-        manifest: ProviderManifest,
-        config: ProviderConfig,
+        manifest: "ProviderManifest",
+        config: "ProviderConfig",
     ) -> None:
         super().__init__(mass, manifest, config)
 
-        # resolve config
-        self.device      = cast(str, self.config.get_value(CONF_INPUT_DEVICE))
-        self.backend     = cast(str, self.config.get_value(CONF_BACKEND))
-        self.sample_rate = cast(int, self.config.get_value(CONF_SAMPLE_RATE))
-        self.channels    = cast(int, self.config.get_value(CONF_CHANNELS))
-        self.name        = cast(str, self.config.get_value(CONF_FRIENDLY_NAME))
+        # Resolve config
+        self.device: str = cast(str, self.config.get_value(CONF_INPUT_DEVICE))
+        self.backend: str = cast(str, self.config.get_value(CONF_BACKEND))
+        self.sample_rate: int = cast(int, self.config.get_value(CONF_SAMPLE_RATE))
+        self.channels: int = cast(int, self.config.get_value(CONF_CHANNELS))
+        self.name: str = cast(str, self.config.get_value(CONF_FRIENDLY_NAME))
 
-        # static source definition – shared for *any* player
+        # Static source definition – shared for any player
         self._source = PluginSource(
             id=self.instance_id,
             name=self.name,
-            passive=False,                     # visible in “Sources” list
+            passive=False,  # visible in “Sources” list
             audio_format=AudioFormat(
                 codec_type=ContentType.PCM_S16LE,
                 content_type=ContentType.PCM_S16LE,
@@ -147,28 +152,24 @@ class AudioInputProvider(PluginProvider):  # noqa: D101
                 channels=self.channels,
             ),
             metadata=PlayerMedia("Live Audio Input"),
-            stream_type=StreamType.CUSTOM,     # we supply bytes via generator
+            stream_type=StreamType.CUSTOM,  # we supply bytes via generator
         )
 
-    # ────────── Provider API ──────────
+    # ───────────── Provider API ─────────────
     @property
-    def supported_features(self) -> set[ProviderFeature]:  # noqa: D401
+    def supported_features(self) -> set[ProviderFeature]:
         return {ProviderFeature.AUDIO_SOURCE}
 
-    def get_source(self) -> PluginSource:  # noqa: D401
+    def get_source(self) -> PluginSource:
         return self._source
 
-    async def get_audio_stream(  # noqa: D401
-        self, player_id: str
-    ):  # -> AsyncGenerator[bytes, None]:
+    async def get_audio_stream(self, player_id: str):
         """
-        Yield raw PCM to whichever player selected us.
+        Yield raw PCM to whichever player selected this source.
 
-        MA will *automatically* close this generator when the user hits
-        stop or picks another source, so we just spawn FFmpeg and pipe
-        its stdout until we’re cancelled.
+        MA automatically closes this generator when playback stops;
+        we spawn FFmpeg and pipe its stdout until cancelled.
         """
-        # Build ffmpeg cmd
         cmd = [
             "ffmpeg",
             "-nostdin",
@@ -197,17 +198,16 @@ class AudioInputProvider(PluginProvider):  # noqa: D101
             "0",
             "-",
         ]
-        self.logger.info("Starting capture for player %s : %s", player_id, " ".join(cmd))
+        self.logger.info("Starting capture for player %s: %s", player_id, " ".join(cmd))
         proc = AsyncProcess(cmd, stdout=True, stderr=True, name=f"audio-capture[{player_id}]")
         await proc.start()
 
         try:
-            async for chunk in proc.iter_stdout():  # PCM bytes
+            async for chunk in proc.iter_stdout():
                 yield chunk
-        except asyncio.CancelledError:
-            # playback stopped
-            self.logger.debug("Playback cancelled – stopping FFmpeg.")
+        except asyncio.CancelledError:  # playback stopped
+            self.logger.debug("Playback cancelled – stopping FFmpeg for %s", player_id)
             raise
         finally:
             with contextlib.suppress(Exception):
-                await proc.close(True)
+                await proc.close(force_kill=True)
