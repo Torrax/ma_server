@@ -300,7 +300,7 @@ class AudioInputProvider(PluginProvider):
                 metadata.images = [MediaItemImage(
                     type=ImageType.THUMB,
                     path=self.thumbnail_image,
-                    provider=self.instance_id,
+                    provider=self.domain,
                     remotely_accessible=False,
                 )]
         
@@ -388,14 +388,38 @@ class AudioInputProvider(PluginProvider):
         This either returns (a generator to get) raw bytes of the image or
         a string with an http(s) URL or local path that is accessible from the server.
         """
+        self.logger.debug("Resolving image path: %s", path)
+        
+        # For URLs, return as-is
+        if path.startswith(('http://', 'https://')):
+            self.logger.debug("Image path is URL, returning as-is: %s", path)
+            return path
+        
         # For relative paths, resolve them relative to the provider directory
-        if not path.startswith(('http://', 'https://')):
-            provider_dir = os.path.dirname(__file__)
-            full_path = os.path.join(provider_dir, path)
-            if os.path.exists(full_path):
-                return full_path
+        provider_dir = os.path.dirname(__file__)
+        full_path = os.path.join(provider_dir, path)
+        
+        self.logger.debug("Provider directory: %s", provider_dir)
+        self.logger.debug("Full image path: %s", full_path)
+        self.logger.debug("Image file exists: %s", os.path.exists(full_path))
+        
+        if os.path.exists(full_path):
+            self.logger.debug("Image file found, returning absolute path: %s", full_path)
+            return full_path
+        else:
+            self.logger.warning("Image file not found: %s", full_path)
+            # Try to find the file in the images subdirectory
+            images_path = os.path.join(provider_dir, "images", path)
+            self.logger.debug("Trying images subdirectory: %s", images_path)
+            
+            if os.path.exists(images_path):
+                self.logger.debug("Image file found in images subdirectory: %s", images_path)
+                return images_path
+            else:
+                self.logger.warning("Image file not found in images subdirectory either: %s", images_path)
         
         # For URLs or if file doesn't exist, return as-is
+        self.logger.debug("Returning path as-is: %s", path)
         return path
 
 
