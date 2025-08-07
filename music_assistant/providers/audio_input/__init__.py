@@ -303,7 +303,7 @@ class AudioInputProvider(PluginProvider):
                 metadata.images = [MediaItemImage(
                     type=ImageType.THUMB,
                     path=self.thumbnail_image,
-                    provider=self.domain,  # Use domain, not instance_id
+                    provider=self.lookup_key,  # Use lookup_key like other providers
                     remotely_accessible=False,
                 )]
                 self.logger.info("Created MediaItemImage: %s", metadata.images[0])
