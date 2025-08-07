@@ -281,7 +281,13 @@ class AudioInputProvider(PluginProvider):
         self._runner_task: asyncio.Task | None = None          # type: ignore[type-arg]
         self._stop_called = False
         self._capture_started = asyncio.Event()
-        self._on_unload_callbacks: list[Callable[..., None]] = []
+        self._on_unload_callbacks: list[Callable[..., None]] = [
+            # Register the image resolution endpoint
+            self.mass.streams.register_dynamic_route(
+                f"/api/providers/{self.instance_id}/resolve_image",
+                self._handle_resolve_image,
+            ),
+        ]
 
         # Static plugin-wide audio source definition
         metadata = PlayerMedia("Live Audio Input")
@@ -370,6 +376,35 @@ class AudioInputProvider(PluginProvider):
         
         # For URLs or if file doesn't exist, return as-is
         return path
+
+    async def _handle_resolve_image(self, request) -> bytes:
+        """Handle image resolution requests from the webserver."""
+        from aiohttp.web import Response
+        
+        # Get the path parameter from the query string
+        path = request.query.get('path', '')
+        if not path:
+            return Response(status=404, text="No path specified")
+        
+        try:
+            # Use the resolve_image method to get the file path
+            resolved_path = await self.resolve_image(path)
+            
+            if isinstance(resolved_path, str) and os.path.exists(resolved_path):
+                # Read and return the file
+                with open(resolved_path, 'rb') as f:
+                    content = f.read()
+                
+                # Determine content type based on file extension
+                content_type = "image/svg+xml" if resolved_path.endswith('.svg') else "image/png"
+                
+                return Response(body=content, content_type=content_type)
+            else:
+                return Response(status=404, text="Image not found")
+                
+        except Exception as err:
+            self.logger.error("Error serving image %s: %s", path, err)
+            return Response(status=500, text="Internal server error")
 
     # ---------------- Internals ----------------
 
@@ -476,8 +511,11 @@ class AudioInputProvider(PluginProvider):
                     
                     # Check if it's a device issue
                     stderr_text = "\n".join(stderr_lines)
-                    if "No such file or directory" in stderr_text or "Device or resource busy" in stderr_text:
-                        self.logger.error("Audio device '%s' not available or busy", self.device)
+                    if "No such file or directory" in stderr_text:
+                        self.logger.error("Audio device '%s' not found", self.device)
+                        break  # Don't retry for device issues
+                    elif "Device or resource busy" in stderr_text:
+                        self.logger.error("Device already in use: Audio device '%s' is currently being used by another application or Music Assistant instance. Please select a different audio input device.", self.device)
                         break  # Don't retry for device issues
                     
                 await proc.close(True)
