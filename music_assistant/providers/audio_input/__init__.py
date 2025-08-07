@@ -137,13 +137,13 @@ class AudioInputProvider(PluginProvider):
         self.backend: str = cast(str, self.config.get_value(CONF_BACKEND))
         self.sample_rate: int = cast(int, self.config.get_value(CONF_SAMPLE_RATE))
         self.channels: int = cast(int, self.config.get_value(CONF_CHANNELS))
-        self.name: str = cast(str, self.config.get_value(CONF_FRIENDLY_NAME))
+        self.friendly_name: str = cast(str, self.config.get_value(CONF_FRIENDLY_NAME))
 
         # Static source definition – shared for any player
         self._source = PluginSource(
             id=self.instance_id,
-            name=self.name,
-            passive=False,  # visible in “Sources” list
+            name=self.friendly_name,
+            passive=False,  # visible in "Sources" list
             audio_format=AudioFormat(
                 codec_type=ContentType.PCM_S16LE,
                 content_type=ContentType.PCM_S16LE,
