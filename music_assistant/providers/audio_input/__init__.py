@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import urllib.parse
 from contextlib import suppress
 from typing import TYPE_CHECKING, Callable, cast
 
@@ -284,9 +285,8 @@ class AudioInputProvider(PluginProvider):
         self._on_unload_callbacks: list[Callable[..., None]] = []
 
         # Static plugin-wide audio source definition
-        metadata = PlayerMedia("Live Audio Input")
-        
         # Add thumbnail image if configured
+        image_url = None
         if self.thumbnail_image:
             self.logger.info("Configuring thumbnail image: %s", self.thumbnail_image)
             # Determine if it's a URL or relative path
@@ -295,18 +295,16 @@ class AudioInputProvider(PluginProvider):
             if is_url:
                 # Direct URL - use as-is
                 self.logger.info("Using direct URL for image: %s", self.thumbnail_image)
-                metadata.image_url = self.thumbnail_image
+                image_url = self.thumbnail_image
             else:
-                # For local files, create a MediaItemImage that will be resolved by our resolve_image method
-                self.logger.info("Creating MediaItemImage for local file: %s", self.thumbnail_image)
-                from music_assistant_models.media_items import MediaItemImage
-                metadata.images = [MediaItemImage(
-                    type=ImageType.THUMB,
-                    path=self.thumbnail_image,
-                    provider=self.lookup_key,  # Use lookup_key like other providers
-                    remotely_accessible=False,
-                )]
-                self.logger.info("Created MediaItemImage: %s", metadata.images[0])
+                # For local files, create a web-accessible URL through MA's image system
+                self.logger.info("Creating web-accessible URL for local file: %s", self.thumbnail_image)
+                # Create a URL that will be handled by the imageproxy
+                encoded_path = urllib.parse.quote_plus(self.thumbnail_image)
+                image_url = f"/imageproxy?provider={self.lookup_key}&path={encoded_path}"
+                self.logger.info("Set image_url to: %s", image_url)
+        
+        metadata = PlayerMedia("Live Audio Input", image_url=image_url)
         
         self._source_details = PluginSource(
             id=self.instance_id,
