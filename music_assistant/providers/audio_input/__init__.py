@@ -288,14 +288,17 @@ class AudioInputProvider(PluginProvider):
         
         # Add thumbnail image if configured
         if self.thumbnail_image:
+            self.logger.info("Configuring thumbnail image: %s", self.thumbnail_image)
             # Determine if it's a URL or relative path
             is_url = self.thumbnail_image.startswith(('http://', 'https://'))
             
             if is_url:
                 # Direct URL - use as-is
+                self.logger.info("Using direct URL for image: %s", self.thumbnail_image)
                 metadata.image_url = self.thumbnail_image
             else:
                 # For local files, create a MediaItemImage with the provider reference
+                self.logger.info("Creating MediaItemImage for local file: %s (provider: %s)", self.thumbnail_image, self.domain)
                 from music_assistant_models.media_items import MediaItemImage
                 metadata.images = [MediaItemImage(
                     type=ImageType.THUMB,
@@ -303,6 +306,7 @@ class AudioInputProvider(PluginProvider):
                     provider=self.domain,
                     remotely_accessible=False,
                 )]
+                self.logger.info("Created MediaItemImage: %s", metadata.images[0])
         
         self._source_details = PluginSource(
             id=self.instance_id,
@@ -331,6 +335,15 @@ class AudioInputProvider(PluginProvider):
 
     async def handle_async_init(self) -> None:
         """Spin up capture daemon once MA is ready."""
+        # Test image resolution immediately
+        if self.thumbnail_image and not self.thumbnail_image.startswith(('http://', 'https://')):
+            self.logger.info("Testing image resolution for: %s", self.thumbnail_image)
+            try:
+                resolved_path = await self.resolve_image(self.thumbnail_image)
+                self.logger.info("Image resolved to: %s", resolved_path)
+            except Exception as err:
+                self.logger.error("Failed to resolve image: %s", err)
+        
         # Start the capture daemon immediately
         self._start_capture_daemon()
 
