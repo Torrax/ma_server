@@ -372,6 +372,16 @@ class AudioInputProvider(PluginProvider):
         # Clean up the named pipe
         await self._cleanup_pipe()
         
+        # Force update all players to remove this source from their source lists
+        for player in self.mass.players.all():
+            # Remove this source from the player's source list
+            player.source_list = [
+                source for source in player.source_list 
+                if source.id != self.instance_id
+            ]
+            # Update the player to refresh the UI
+            self.mass.players.update(player.player_id, force_update=True)
+        
         self.logger.info("Audio input provider %s unloaded successfully", self.friendly_name)
 
     # ---------------- PluginProvider hooks ----------------
