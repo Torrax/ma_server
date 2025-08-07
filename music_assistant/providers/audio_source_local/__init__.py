@@ -100,7 +100,7 @@ async def get_config_entries(
             key=CONF_CUSTOM_IMAGE,
             type=ConfigEntryType.STRING,
             label="Custom Image",
-            description="Enter one of the image names shown above, or a URL to an SVG image (leave blank for default icon.svg)",
+            description="Enter one of the image names shown above (leave blank for default icon.svg)",
             default_value="",
             required=False,
         ),
@@ -279,9 +279,8 @@ async def _get_image_info() -> str:
     except Exception as e:
         image_list.append(f"⚠️  Error reading images folder: {str(e)}")
     
-    # Always add the default option and URL info
+    # Always add the default option
     image_list.append("• default – Default provider icon (leave blank for default)")
-    image_list.append("• URL – Enter any https:// URL to an SVG image")
     
     return "\n".join(image_list)
 
@@ -396,11 +395,9 @@ class LocalAudioSourceProvider(MusicProvider):
         custom_image = self.config.get_value(CONF_CUSTOM_IMAGE)
         if not custom_image or custom_image.strip() == "":
             image_path = "icon.svg"
-            is_remote_url = False
         else:
-            # Dynamically find the image file in the images folder or handle URL
+            # Dynamically find the image file in the images folder
             image_path = await self._find_image_file(custom_image)
-            is_remote_url = image_path.startswith(("http://", "https://"))
         
         # Create unique radio item ID for this instance to prevent name conflicts
         unique_radio_id = f"{AUDIO_SOURCE_ID}_{self.instance_id}"
@@ -431,7 +428,7 @@ class LocalAudioSourceProvider(MusicProvider):
                         type=ImageType.THUMB,
                         path=image_path,
                         provider=self.domain,
-                        remotely_accessible=is_remote_url,
+                        remotely_accessible=False,
                     )
                 ]),
             ),
@@ -671,16 +668,12 @@ class LocalAudioSourceProvider(MusicProvider):
                 await asyncio.sleep(5)
 
     async def _find_image_file(self, image_name: str) -> str:
-        """Find the actual image file based on the user input (case-insensitive) or return URL if provided."""
+        """Find the actual image file based on the user input (case-insensitive)."""
         import os
         
         # Handle special cases
         if image_name.lower() in ("default", "icon"):
             return "icon.svg"
-        
-        # Check if it's a URL (starts with http:// or https://)
-        if image_name.startswith(("http://", "https://")):
-            return image_name  # Return URL as-is
         
         provider_dir = os.path.dirname(__file__)
         images_dir = os.path.join(provider_dir, "images")
@@ -706,35 +699,20 @@ class LocalAudioSourceProvider(MusicProvider):
         return "icon.svg"
 
     async def resolve_image(self, path: str) -> str | bytes:
-        """Resolve an image from an image path or URL."""
+        """Resolve an image from an image path."""
         import os
-        
-        self.logger.debug("resolve_image called with path: %s", path)
-        
-        # Handle URLs - return as-is for Music Assistant to fetch
-        if path.startswith(("http://", "https://")):
-            self.logger.debug("Returning URL as-is: %s", path)
-            return path
-        
         provider_dir = os.path.dirname(__file__)
         
         # Handle custom images from the images folder (any image file)
-        if path != "icon.svg":
+        if not path.endswith(("icon.svg", "icon_monochrome.svg")):
             image_path = os.path.join(provider_dir, "images", path)
             if os.path.exists(image_path):
-                self.logger.debug("Found local image: %s", image_path)
                 return image_path
-            else:
-                self.logger.debug("Local image not found: %s", image_path)
         
-        # Handle default provider icon
-        if path == "icon.svg":
+        # Handle default provider icons
+        if path in ("icon.svg", "icon_monochrome.svg"):
             icon_path = os.path.join(provider_dir, path)
             if os.path.exists(icon_path):
-                self.logger.debug("Found default icon: %s", icon_path)
                 return icon_path
-            else:
-                self.logger.debug("Default icon not found: %s", icon_path)
         
-        self.logger.debug("Returning path unchanged: %s", path)
         return path
