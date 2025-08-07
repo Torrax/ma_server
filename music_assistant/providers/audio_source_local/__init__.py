@@ -430,7 +430,7 @@ class LocalAudioSourceProvider(MusicProvider):
                     MediaItemImage(
                         type=ImageType.THUMB,
                         path=image_path,
-                        provider=self.domain if not is_remote_url else None,
+                        provider=self.domain,
                         remotely_accessible=is_remote_url,
                     )
                 ]),
@@ -709,8 +709,11 @@ class LocalAudioSourceProvider(MusicProvider):
         """Resolve an image from an image path or URL."""
         import os
         
+        self.logger.debug("resolve_image called with path: %s", path)
+        
         # Handle URLs - return as-is for Music Assistant to fetch
         if path.startswith(("http://", "https://")):
+            self.logger.debug("Returning URL as-is: %s", path)
             return path
         
         provider_dir = os.path.dirname(__file__)
@@ -719,12 +722,19 @@ class LocalAudioSourceProvider(MusicProvider):
         if path != "icon.svg":
             image_path = os.path.join(provider_dir, "images", path)
             if os.path.exists(image_path):
+                self.logger.debug("Found local image: %s", image_path)
                 return image_path
+            else:
+                self.logger.debug("Local image not found: %s", image_path)
         
         # Handle default provider icon
         if path == "icon.svg":
             icon_path = os.path.join(provider_dir, path)
             if os.path.exists(icon_path):
+                self.logger.debug("Found default icon: %s", icon_path)
                 return icon_path
+            else:
+                self.logger.debug("Default icon not found: %s", icon_path)
         
+        self.logger.debug("Returning path unchanged: %s", path)
         return path
