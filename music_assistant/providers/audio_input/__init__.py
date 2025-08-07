@@ -370,7 +370,7 @@ class AudioInputProvider(PluginProvider):
         capture_cmd: list[str] = [
             "sh", "-c",
             f"arecord -D {self.ffmpeg_device} -f S16_LE -c {self.channels} -r {self.sample_rate} -t raw | "
-            f"ffmpeg -nostdin -hide_banner -loglevel warning "
+            f"ffmpeg -y -nostdin -hide_banner -loglevel warning "
             f"-f s16le -ac {self.channels} -ar {self.sample_rate} -i - "
             f"-acodec pcm_s16le -f s16le "
             f"-fflags +nobuffer -flags +low_delay "
@@ -433,7 +433,15 @@ class AudioInputProvider(PluginProvider):
             retry_count += 1
             if retry_count < max_retries:
                 self.logger.warning("Capture process stopped unexpectedly – retrying in 5 s… (attempt %d/%d)", retry_count + 1, max_retries)
+                # Clean up pipe before retry
+                await self._cleanup_pipe()
                 await asyncio.sleep(5)
+                # Recreate pipe for next attempt
+                try:
+                    await check_output("mkfifo", self.named_pipe)
+                except Exception as err:
+                    self.logger.error("Failed to recreate named pipe %s: %s", self.named_pipe, err)
+                    break
             else:
                 self.logger.error("Max retries reached, stopping capture daemon")
                 break
