@@ -78,14 +78,18 @@ async def get_config_entries(
     values: dict[str, ConfigValueType] | None = None,  # noqa: ARG001
 ) -> tuple[ConfigEntry, ...]:
     """Config wizard for the plugin."""
+    # Get available input devices
+    device_options = await _get_available_input_devices()
+    
     return (
         CONF_ENTRY_WARN_PREVIEW,
         ConfigEntry(
             key=CONF_INPUT_DEVICE,
             type=ConfigEntryType.STRING,
-            label="Capture device (FFmpeg syntax)",
-            description="e.g. pulse:bluez_source.XX_XX_XX_XX or jack:system:capture_1|system:capture_2",
-            default_value="default",
+            label="Audio Input Device",
+            description="Select an available audio input device",
+            options=device_options,
+            default_value=device_options[0].value if device_options else "default",
             required=True,
         ),
         ConfigEntry(
@@ -123,6 +127,154 @@ async def get_config_entries(
             required=True,
         ),
     )
+
+
+async def _get_available_input_devices() -> list[ConfigValueOption]:
+    """Scan for available audio input devices."""
+    devices = []
+    
+    # Try PulseAudio/PipeWire sources first
+    try:
+        pulse_devices = await _get_pulse_sources()
+        devices.extend(pulse_devices)
+    except Exception as err:
+        # Log but don't fail
+        pass
+    
+    # Try JACK sources
+    try:
+        jack_devices = await _get_jack_sources()
+        devices.extend(jack_devices)
+    except Exception as err:
+        # Log but don't fail
+        pass
+    
+    # Add fallback options
+    if not devices:
+        devices = [
+            ConfigValueOption("Default Audio Input", "default"),
+            ConfigValueOption("Manual Entry (pulse:device_name)", "pulse:"),
+            ConfigValueOption("Manual Entry (jack:port_name)", "jack:"),
+        ]
+    
+    return devices
+
+
+async def _get_pulse_sources() -> list[ConfigValueOption]:
+    """Get PulseAudio/PipeWire source devices."""
+    devices = []
+    
+    try:
+        # Use pactl to list sources
+        returncode, output = await check_output("pactl", "list", "short", "sources")
+        if returncode == 0:
+            lines = output.decode('utf-8').strip().split('\n')
+            for line in lines:
+                if line.strip():
+                    parts = line.split('\t')
+                    if len(parts) >= 2:
+                        source_name = parts[1]
+                        # Skip monitor sources (they're outputs, not inputs)
+                        if '.monitor' not in source_name:
+                            # Get friendly name if possible
+                            try:
+                                returncode2, desc_output = await check_output(
+                                    "pactl", "list", "sources"
+                                )
+                                if returncode2 == 0:
+                                    desc_text = desc_output.decode('utf-8')
+                                    # Extract description for this source
+                                    friendly_name = _extract_pulse_description(desc_text, source_name)
+                                    if friendly_name:
+                                        display_name = f"{friendly_name} ({source_name})"
+                                    else:
+                                        display_name = source_name
+                                else:
+                                    display_name = source_name
+                            except Exception:
+                                display_name = source_name
+                            
+                            devices.append(ConfigValueOption(
+                                display_name,
+                                f"pulse:{source_name}"
+                            ))
+    except Exception:
+        # pactl not available or failed
+        pass
+    
+    return devices
+
+
+async def _get_jack_sources() -> list[ConfigValueOption]:
+    """Get JACK input ports."""
+    devices = []
+    
+    try:
+        # Use jack_lsp to list ports
+        returncode, output = await check_output("jack_lsp", "-p")
+        if returncode == 0:
+            lines = output.decode('utf-8').strip().split('\n')
+            input_ports = []
+            current_port = None
+            
+            for line in lines:
+                line = line.strip()
+                if line and not line.startswith('\t'):
+                    current_port = line
+                elif line.startswith('\t') and 'input' in line and current_port:
+                    input_ports.append(current_port)
+            
+            # Group stereo pairs
+            stereo_pairs = []
+            mono_ports = []
+            
+            for port in input_ports:
+                if port.endswith('_1') or port.endswith(':1'):
+                    base = port[:-2]
+                    pair_port = base + '_2' if port.endswith('_1') else base + ':2'
+                    if pair_port in input_ports:
+                        stereo_pairs.append((port, pair_port))
+                    else:
+                        mono_ports.append(port)
+                elif not any(port.endswith('_2') or port.endswith(':2') for p in input_ports if p.startswith(port[:-2])):
+                    mono_ports.append(port)
+            
+            # Add stereo pairs
+            for left, right in stereo_pairs:
+                devices.append(ConfigValueOption(
+                    f"JACK Stereo: {left.split(':')[0]}",
+                    f"jack:{left}|{right}"
+                ))
+            
+            # Add mono ports
+            for port in mono_ports:
+                devices.append(ConfigValueOption(
+                    f"JACK Mono: {port}",
+                    f"jack:{port}"
+                ))
+                
+    except Exception:
+        # jack_lsp not available or JACK not running
+        pass
+    
+    return devices
+
+
+def _extract_pulse_description(pactl_output: str, source_name: str) -> str | None:
+    """Extract friendly description from pactl list sources output."""
+    lines = pactl_output.split('\n')
+    in_source = False
+    
+    for line in lines:
+        if f"Name: {source_name}" in line:
+            in_source = True
+        elif in_source and line.startswith('Source #'):
+            in_source = False
+        elif in_source and 'Description:' in line:
+            desc = line.split('Description:', 1)[1].strip()
+            return desc
+    
+    return None
 
 # ------------------------------------------------------------------
 # PROVIDER IMPLEMENTATION
