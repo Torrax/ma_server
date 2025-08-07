@@ -298,12 +298,12 @@ class AudioInputProvider(PluginProvider):
                 metadata.image_url = self.thumbnail_image
             else:
                 # For local files, create a MediaItemImage with the provider reference
-                self.logger.info("Creating MediaItemImage for local file: %s (provider: %s)", self.thumbnail_image, self.domain)
+                self.logger.info("Creating MediaItemImage for local file: %s (provider: %s, instance: %s)", self.thumbnail_image, self.domain, self.instance_id)
                 from music_assistant_models.media_items import MediaItemImage
                 metadata.images = [MediaItemImage(
                     type=ImageType.THUMB,
                     path=self.thumbnail_image,
-                    provider=self.domain,
+                    provider=self.instance_id,
                     remotely_accessible=False,
                 )]
                 self.logger.info("Created MediaItemImage: %s", metadata.images[0])
