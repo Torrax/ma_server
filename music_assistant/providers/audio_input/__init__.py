@@ -168,7 +168,7 @@ async def _get_alsa_devices() -> list[ConfigValueOption]:
                             name_part = line.split(': ')[1] if ': ' in line else f"Card {card_part} Device {device_part}"
                             
                             devices.append(ConfigValueOption(
-                                f"ALSA: {name_part}",
+                                name_part,
                                 f"alsa:hw:{card_part},{device_part}"
                             ))
                         except (IndexError, ValueError):
@@ -402,7 +402,15 @@ class AudioInputProvider(PluginProvider):
                 stderr_lines = []
                 async for line in proc.iter_stderr():
                     stderr_lines.append(line)
-                    self.logger.warning("Capture stderr: %s", line)
+                    # Only log actual errors, not normal operational messages
+                    if any(error_keyword in line.lower() for error_keyword in ['error', 'failed', 'cannot', 'unable']):
+                        self.logger.warning("Capture stderr: %s", line)
+                    elif "overrun" in line.lower():
+                        # Overruns are normal when no one is reading the stream
+                        self.logger.debug("Audio buffer overrun (normal when stream not active): %s", line)
+                    else:
+                        # Log other messages at debug level
+                        self.logger.debug("Capture info: %s", line)
 
                 # Wait for process to complete and get return code
                 return_code = await proc.wait()
