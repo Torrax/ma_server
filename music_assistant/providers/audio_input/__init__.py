@@ -281,13 +281,7 @@ class AudioInputProvider(PluginProvider):
         self._runner_task: asyncio.Task | None = None          # type: ignore[type-arg]
         self._stop_called = False
         self._capture_started = asyncio.Event()
-        self._on_unload_callbacks: list[Callable[..., None]] = [
-            # Register the image resolution endpoint
-            self.mass.streams.register_dynamic_route(
-                f"/api/providers/{self.instance_id}/resolve_image",
-                self._handle_resolve_image,
-            ),
-        ]
+        self._on_unload_callbacks: list[Callable[..., None]] = []
 
         # Static plugin-wide audio source definition
         metadata = PlayerMedia("Live Audio Input")
@@ -298,20 +292,17 @@ class AudioInputProvider(PluginProvider):
             is_url = self.thumbnail_image.startswith(('http://', 'https://'))
             
             if is_url:
-                # Direct URL - use image_url for PlayerMedia
+                # Direct URL - use as-is
                 metadata.image_url = self.thumbnail_image
             else:
-                # Relative path - resolve relative to provider directory
-                provider_dir = os.path.dirname(__file__)
-                image_path = os.path.join(provider_dir, self.thumbnail_image)
-                
-                # Check if file exists
-                if os.path.exists(image_path):
-                    # For local files, we need to create a URL that can be resolved
-                    # Use the provider's resolve_image method via the webserver
-                    metadata.image_url = f"/api/providers/{self.instance_id}/resolve_image?path={self.thumbnail_image}"
-                else:
-                    self.logger.warning("Thumbnail image not found: %s", image_path)
+                # For local files, create a MediaItemImage with the provider reference
+                from music_assistant_models.media_items import MediaItemImage
+                metadata.images = [MediaItemImage(
+                    type=ImageType.THUMB,
+                    path=self.thumbnail_image,
+                    provider=self.instance_id,
+                    remotely_accessible=False,
+                )]
         
         self._source_details = PluginSource(
             id=self.instance_id,
@@ -407,34 +398,6 @@ class AudioInputProvider(PluginProvider):
         # For URLs or if file doesn't exist, return as-is
         return path
 
-    async def _handle_resolve_image(self, request) -> bytes:
-        """Handle image resolution requests from the webserver."""
-        from aiohttp.web import Response
-        
-        # Get the path parameter from the query string
-        path = request.query.get('path', '')
-        if not path:
-            return Response(status=404, text="No path specified")
-        
-        try:
-            # Use the resolve_image method to get the file path
-            resolved_path = await self.resolve_image(path)
-            
-            if isinstance(resolved_path, str) and os.path.exists(resolved_path):
-                # Read and return the file
-                with open(resolved_path, 'rb') as f:
-                    content = f.read()
-                
-                # Determine content type based on file extension
-                content_type = "image/svg+xml" if resolved_path.endswith('.svg') else "image/png"
-                
-                return Response(body=content, content_type=content_type)
-            else:
-                return Response(status=404, text="Image not found")
-                
-        except Exception as err:
-            self.logger.error("Error serving image %s: %s", path, err)
-            return Response(status=500, text="Internal server error")
 
     # ---------------- Internals ----------------
 
