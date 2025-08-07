@@ -43,10 +43,7 @@ if TYPE_CHECKING:
     from music_assistant.models import ProviderInstanceType
 
 
-# Use instance-specific ID to avoid conflicts between multiple instances
-def get_audio_source_id(instance_id: str) -> str:
-    """Get unique audio source ID for this instance."""
-    return f"audio_source_local_{instance_id}"
+# We'll generate unique IDs per instance instead of using a static ID
 DEFAULT_SAMPLE_RATE = 44100
 DEFAULT_CHANNELS = 2
 DEFAULT_BIT_DEPTH = 16
@@ -402,13 +399,13 @@ class LocalAudioSourceProvider(MusicProvider):
             # Dynamically find the image file in the images folder
             image_path = await self._find_image_file(custom_image)
         
-        # Use instance-specific ID to avoid conflicts
-        audio_source_id = get_audio_source_id(self.instance_id)
+        # Use instance ID to create unique radio item ID for each provider instance
+        audio_source_id = f"audio_source_{self.instance_id}"
         
         # Return the local audio input as a radio station
         yield Radio(
             item_id=audio_source_id,
-            provider=self.lookup_key,
+            provider=self.instance_id,
             name=custom_name,
             provider_mappings={
                 ProviderMapping(
@@ -439,8 +436,9 @@ class LocalAudioSourceProvider(MusicProvider):
 
     async def get_radio(self, prov_radio_id: str) -> Radio:
         """Get full radio details by id."""
-        audio_source_id = get_audio_source_id(self.instance_id)
-        if prov_radio_id != audio_source_id:
+        # Check if this is our audio source ID for this instance
+        expected_id = f"audio_source_{self.instance_id}"
+        if prov_radio_id != expected_id:
             raise MediaNotFoundError(f"Radio {prov_radio_id} not found")
         
         # Return the radio from the library
@@ -452,8 +450,9 @@ class LocalAudioSourceProvider(MusicProvider):
 
     async def get_stream_details(self, item_id: str, media_type: MediaType) -> StreamDetails:
         """Get streamdetails for a track/radio."""
-        audio_source_id = get_audio_source_id(self.instance_id)
-        if item_id != audio_source_id:
+        # Check if this is our audio source ID for this instance
+        expected_id = f"audio_source_{self.instance_id}"
+        if item_id != expected_id:
             raise MediaNotFoundError(f"Item {item_id} not found")
         
         sample_rate = self.config.get_value(CONF_SAMPLE_RATE)
@@ -478,8 +477,9 @@ class LocalAudioSourceProvider(MusicProvider):
         self, streamdetails: StreamDetails, seek_position: int = 0
     ) -> AsyncGenerator[bytes, None]:
         """Return the audio stream for the local audio source."""
-        audio_source_id = get_audio_source_id(self.instance_id)
-        if streamdetails.item_id != audio_source_id:
+        # Check if this is our audio source ID for this instance
+        expected_id = f"audio_source_{self.instance_id}"
+        if streamdetails.item_id != expected_id:
             raise MediaNotFoundError(f"Item {streamdetails.item_id} not found")
         
         # Create a new capture process for each stream to avoid concurrency issues
@@ -707,22 +707,12 @@ class LocalAudioSourceProvider(MusicProvider):
         if not path.endswith(("icon.svg", "icon_monochrome.svg")):
             image_path = os.path.join(provider_dir, "images", path)
             if os.path.exists(image_path):
-                # Read and return the image content as bytes
-                try:
-                    with open(image_path, 'rb') as f:
-                        return f.read()
-                except Exception as e:
-                    self.logger.error("Failed to read image file %s: %s", image_path, e)
-                    # Fall through to default handling
+                return image_path
         
         # Handle default provider icons
         if path in ("icon.svg", "icon_monochrome.svg"):
             icon_path = os.path.join(provider_dir, path)
             if os.path.exists(icon_path):
-                try:
-                    with open(icon_path, 'rb') as f:
-                        return f.read()
-                except Exception as e:
-                    self.logger.error("Failed to read icon file %s: %s", icon_path, e)
+                return icon_path
         
         return path
