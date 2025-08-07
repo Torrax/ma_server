@@ -297,20 +297,11 @@ class AudioInputProvider(PluginProvider):
                 self.logger.info("Using direct URL for image: %s", self.thumbnail_image)
                 metadata.image_url = self.thumbnail_image
             else:
-                # For local files, resolve the path immediately and set as image_url
-                self.logger.info("Resolving local image path: %s", self.thumbnail_image)
-                try:
-                    # Resolve the image path immediately
-                    provider_dir = os.path.dirname(__file__)
-                    full_path = os.path.join(provider_dir, self.thumbnail_image)
-                    
-                    if os.path.exists(full_path):
-                        self.logger.info("Setting image_url to resolved path: %s", full_path)
-                        metadata.image_url = f"file://{full_path}"
-                    else:
-                        self.logger.warning("Image file not found: %s", full_path)
-                except Exception as err:
-                    self.logger.error("Failed to resolve image path: %s", err)
+                # For local files, create a web-accessible URL through MA's image system
+                self.logger.info("Creating web-accessible URL for local file: %s", self.thumbnail_image)
+                # Create a URL that will be handled by the resolve_image method
+                metadata.image_url = f"/api/providers/{self.instance_id}/image/{self.thumbnail_image}"
+                self.logger.info("Set image_url to: %s", metadata.image_url)
         
         self._source_details = PluginSource(
             id=self.instance_id,
