@@ -2,12 +2,9 @@
 Live-Audio-Input plugin for Music Assistant
 ==========================================
 
-Captures raw PCM from a user-selected PulseAudio / PipeWire / JACK /
-(other FFmpeg device) input and forwards it to a Music Assistant
+Captures raw PCM from a user-selected PulseAudio input
+and forwards it to a Music Assistant
 player through an ultra-low-latency named pipe.
-
-⚠  *No arecord / ALSA binaries are invoked – capture is done
-   directly by FFmpeg.*
 
 Author: you (@Torrax)
 """
@@ -50,9 +47,9 @@ if TYPE_CHECKING:
 # CONFIG KEYS
 # ------------------------------------------------------------------
 
-CONF_INPUT_DEVICE = "input_device"            # e.g. "alsa:hw:1,0"
-CONF_SAMPLE_RATE = "sample_rate"             # int (Hz)
-CONF_CHANNELS = "channels"                 # 1 or 2
+CONF_INPUT_DEVICE = "input_device"             # e.g. "alsa:hw:1,0"
+CONF_SAMPLE_RATE = "sample_rate"               # int (Hz)
+CONF_CHANNELS = "channels"                     # 1 or 2
 CONF_FRIENDLY_NAME = "friendly_name"           # UI label
 CONF_THUMBNAIL_IMAGE = "thumbnail_image"       # Image path/URL
 
@@ -515,4 +512,5 @@ class AudioInputProvider(PluginProvider):
 
         # Final clean-up
         await self._cleanup_pipe()
+
 
