@@ -9,7 +9,7 @@ player through an ultra-low-latency named pipe.
 ⚠  *No arecord / ALSA binaries are invoked – capture is done
    directly by FFmpeg.*
 
-Author: you (@yourgithubusername)
+Author: you (@Torrax)
 """
 
 from __future__ import annotations
@@ -515,3 +515,4 @@ class AudioInputProvider(PluginProvider):
 
         # Final clean-up
         await self._cleanup_pipe()
+
