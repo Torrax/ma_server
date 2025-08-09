@@ -2,8 +2,8 @@
 Live-Audio-Input plugin for Music Assistant
 ==========================================
 
-Captures raw PCM from a user-selected PulseAudio input
-and forwards it to a Music Assistant
+Captures raw PCM from a user-selected PulseAudio / PipeWire /
+(other FFmpeg device) input and forwards it to a Music Assistant
 player through an ultra-low-latency named pipe.
 
 Author: you (@Torrax)
@@ -135,20 +135,11 @@ async def _get_available_input_devices() -> list[ConfigValueOption]:
         # Log but don't fail
         pass
     
-    # Try JACK sources
-    try:
-        jack_devices = await _get_jack_sources()
-        devices.extend(jack_devices)
-    except Exception:
-        # Log but don't fail
-        pass
-    
     # Add fallback options
     if not devices:
         devices = [
             ConfigValueOption("Default Audio Input", "default"),
             ConfigValueOption("Manual Entry (alsa:hw:X,Y)", "alsa:"),
-            ConfigValueOption("Manual Entry (jack:port_name)", "jack:"),
         ]
     
     return devices
@@ -184,61 +175,6 @@ async def _get_alsa_devices() -> list[ConfigValueOption]:
                             continue
     except Exception:
         # arecord not available or failed
-        pass
-    
-    return devices
-
-
-async def _get_jack_sources() -> list[ConfigValueOption]:
-    """Get JACK input ports."""
-    devices = []
-    
-    try:
-        # Use jack_lsp to list ports
-        returncode, output = await check_output("jack_lsp", "-p")
-        if returncode == 0:
-            lines = output.decode('utf-8').strip().split('\n')
-            input_ports = []
-            current_port = None
-            
-            for line in lines:
-                line = line.strip()
-                if line and not line.startswith('\t'):
-                    current_port = line
-                elif line.startswith('\t') and 'input' in line and current_port:
-                    input_ports.append(current_port)
-            
-            # Group stereo pairs
-            stereo_pairs = []
-            mono_ports = []
-            
-            for port in input_ports:
-                if port.endswith('_1') or port.endswith(':1'):
-                    base = port[:-2]
-                    pair_port = base + '_2' if port.endswith('_1') else base + ':2'
-                    if pair_port in input_ports:
-                        stereo_pairs.append((port, pair_port))
-                    else:
-                        mono_ports.append(port)
-                elif not any(port.endswith('_2') or port.endswith(':2') for p in input_ports if p.startswith(port[:-2])):
-                    mono_ports.append(port)
-            
-            # Add stereo pairs
-            for left, right in stereo_pairs:
-                devices.append(ConfigValueOption(
-                    f"JACK Stereo: {left.split(':')[0]}",
-                    f"jack:{left}|{right}"
-                ))
-            
-            # Add mono ports
-            for port in mono_ports:
-                devices.append(ConfigValueOption(
-                    f"JACK Mono: {port}",
-                    f"jack:{port}"
-                ))
-                
-    except Exception:
-        # jack_lsp not available or JACK not running
         pass
     
     return devices
@@ -374,8 +310,6 @@ class AudioInputProvider(PluginProvider):
         if device.startswith("pulse:"):
             # PulseAudio - but FFmpeg might not support it, try ALSA instead
             return "alsa", "default"
-        elif device.startswith("jack:"):
-            return "jack", device[5:]  # Remove "jack:" prefix
         elif device.startswith("alsa:"):
             return "alsa", device[5:]  # Remove "alsa:" prefix
         elif device == "default":
@@ -512,5 +446,3 @@ class AudioInputProvider(PluginProvider):
 
         # Final clean-up
         await self._cleanup_pipe()
-
-
