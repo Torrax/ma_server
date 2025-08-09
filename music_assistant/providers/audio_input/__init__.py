@@ -4,7 +4,7 @@ Live-Audio-Input plugin for Music Assistant
 
 Captures raw PCM from a user-selected PulseAudio / PipeWire /
 (other FFmpeg device) input and forwards it to a Music Assistant
-player through an ultra-low-latency named pipe.
+player through an ultra-low-latency stream (CUSTOM provider).
 
 Author: you (@Torrax)
 """
@@ -15,6 +15,7 @@ import asyncio
 import os
 from contextlib import suppress
 from typing import TYPE_CHECKING, Callable, cast
+from collections.abc import AsyncGenerator
 
 from music_assistant_models.config_entries import (
     ConfigEntry,
@@ -204,12 +205,10 @@ class AudioInputProvider(PluginProvider):
         self.friendly_name: str = cast(str, self.config.get_value(CONF_FRIENDLY_NAME))
         self.thumbnail_image: str = cast(str, self.config.get_value(CONF_THUMBNAIL_IMAGE) or "")
         
-        # Parse device string to determine format and device
+        # Parse device string for arecord
         self.ffmpeg_format, self.ffmpeg_device = self._parse_device_string(self.device)
 
         # Runtime helpers
-        self.cache_dir = os.path.join(self.mass.cache_path, self.instance_id)
-        self.named_pipe = f"/tmp/{self.instance_id}"   # noqa: S108
         self._capture_proc: AsyncProcess | None = None
         self._runner_task: asyncio.Task | None = None          # type: ignore[type-arg]
         self._stop_called = False
@@ -240,8 +239,8 @@ class AudioInputProvider(PluginProvider):
                 channels=self.channels,
             ),
             metadata=metadata,
-            stream_type=StreamType.NAMED_PIPE,
-            path=self.named_pipe,
+            stream_type=StreamType.CUSTOM,
+            path="",  # not used for CUSTOM
         )
 
     # ---------------- Provider API ----------------
@@ -251,16 +250,16 @@ class AudioInputProvider(PluginProvider):
         return {ProviderFeature.AUDIO_SOURCE}
 
     async def handle_async_init(self) -> None:
-        """Spin up capture daemon once MA is ready."""
-        # Start the capture daemon immediately
-        self._start_capture_daemon()
+        """Called when MA is ready."""
+        # No background capture for CUSTOM streams.
+        return
 
     async def unload(self, is_removed: bool = False) -> None:
         """Tear down."""
         self.logger.info("Unloading audio input provider %s", self.friendly_name)
         self._stop_called = True
         
-        # Stop the capture process first
+        # Stop the capture process first (if any active CUSTOM stream)
         if self._capture_proc and not self._capture_proc.closed:
             self.logger.info("Terminating capture process for %s", self.friendly_name)
             try:
@@ -268,7 +267,7 @@ class AudioInputProvider(PluginProvider):
             except Exception as err:
                 self.logger.warning("Error stopping capture process: %s", err)
         
-        # Cancel the runner task
+        # Cancel the runner task (not used anymore, but keep for safety)
         if self._runner_task and not self._runner_task.done():
             self._runner_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -280,9 +279,6 @@ class AudioInputProvider(PluginProvider):
                 cb()
             except Exception as err:
                 self.logger.warning("Error during callback cleanup: %s", err)
-        
-        # Clean up the named pipe
-        await self._cleanup_pipe()
         
         # Force update all players to remove this source from their source lists
         for player in self.mass.players.all():
@@ -299,150 +295,75 @@ class AudioInputProvider(PluginProvider):
     # ---------------- PluginProvider hooks ----------------
 
     def get_source(self) -> PluginSource:
-        """Expose the capture device as a PlayerSource."""
+        """Expose this input as a PlayerSource (CUSTOM stream)."""
         return self._source_details
 
+    async def get_audio_stream(self, player_id: str) -> AsyncGenerator[bytes, None]:
+        """Yield raw PCM from arecord directly to MA (low-latency CUSTOM stream).
+
+        We capture S16_LE at the configured sample rate/channels and feed
+        small frames (~20 ms) into the MA pipeline. MA will then run a single
+        FFmpeg stage for any resampling/output formatting required by the player.
+        """
+        # assemble arecord command
+        # Use small period/buffer times to reduce capture-side latency.
+        # (arecord -F/--period-time and -B/--buffer-time take microseconds)
+        # If these are unsupported by the device, arecord will error and MA will log it.
+        bytes_per_sec = self.sample_rate * self.channels * 2  # 16-bit PCM
+        chunk_size = max(1024, bytes_per_sec // 50)  # ~20 ms frames
+
+        cmd: list[str] = [
+            "arecord",
+            "-D", self.ffmpeg_device,
+            "-f", "S16_LE",
+            "-c", str(self.channels),
+            "-r", str(self.sample_rate),
+            "-t", "raw",
+            # Lower-latency capture hints (µs). Safe but aggressive defaults.
+            "-F", "10000",   # 10 ms period
+            "-B", "20000",   # 20 ms buffer
+            "-"              # stdout
+        ]
+
+        self.logger.info(
+            "Starting CUSTOM live-capture for %s (device=%s, sr=%d, ch=%d, chunk=%dB)",
+            self.friendly_name, self.ffmpeg_device, self.sample_rate, self.channels, chunk_size
+        )
+
+        self._capture_proc = proc = AsyncProcess(
+            cmd, stdout=True, stderr=True, name=f"audio-capture[{self.friendly_name}]"
+        )
+        try:
+            await proc.start()
+        except Exception as err:
+            self.logger.error("Failed to start arecord: %s", err)
+            return
+
+        try:
+            # stream stdout in small chunks
+            async for chunk in proc.iter_chunked(chunk_size):
+                if not chunk:
+                    break
+                yield chunk
+        except Exception as err:
+            self.logger.error("Error while reading arecord stream: %s", err)
+            raise
+        finally:
+            with suppress(Exception):
+                await proc.close(True)
+            self._capture_proc = None
 
     # ---------------- Internals ----------------
 
     def _parse_device_string(self, device: str) -> tuple[str, str]:
-        """Parse device string to determine FFmpeg format and device."""
+        """Parse device string for arecord."""
         if device.startswith("pulse:"):
-            # PulseAudio - but FFmpeg might not support it, try ALSA instead
+            # PulseAudio - fallback to default ALSA device
             return "alsa", "default"
         elif device.startswith("alsa:"):
             return "alsa", device[5:]  # Remove "alsa:" prefix
         elif device == "default":
             return "alsa", "default"
         else:
-            # Assume ALSA format
+            # Assume ALSA format/device string
             return "alsa", device
-
-    def _start_capture_daemon(self) -> None:
-        if self._runner_task and not self._runner_task.done():
-            return  # already running
-        self._runner_task = self.mass.create_task(self._capture_runner())
-
-    def _stop_capture_daemon(self) -> None:
-        if self._runner_task and not self._runner_task.done():
-            self._runner_task.cancel()
-
-    async def _cleanup_pipe(self) -> None:
-        """Remove stale FIFO."""
-        await check_output("rm", "-f", self.named_pipe)
-
-    async def _capture_runner(self) -> None:
-        """Background task: keep audio capture alive using arecord + FFmpeg pipeline."""
-        self.logger.info("Starting audio capture daemon for %s", self.friendly_name)
-        
-        # Clean up any existing pipe and create new one
-        await self._cleanup_pipe()
-        await asyncio.sleep(0.1)
-        
-        try:
-            await check_output("mkfifo", self.named_pipe)
-        except Exception as err:
-            self.logger.error("Failed to create named pipe %s: %s", self.named_pipe, err)
-            return
-            
-        await asyncio.sleep(0.1)  # ensure pipe exists before ffmpeg starts
-
-        # Use arecord to capture audio and pipe to FFmpeg for processing
-        # This avoids FFmpeg's input format issues
-        capture_cmd: list[str] = [
-            "sh", "-c",
-            f"arecord -D {self.ffmpeg_device} -f S16_LE -c {self.channels} -r {self.sample_rate} -t raw | "
-            f"ffmpeg -y -nostdin -hide_banner -loglevel warning "
-            f"-f s16le -ac {self.channels} -ar {self.sample_rate} -i - "
-            f"-acodec pcm_s16le -f s16le "
-            f"-fflags +nobuffer -flags +low_delay "
-            f"-probesize 32 -analyzeduration 0 "
-            f"{self.named_pipe}"
-        ]
-
-        self.logger.info(
-            "Launching audio capture pipeline for device: %s",
-            self.ffmpeg_device,
-        )
-
-        retry_count = 0
-        max_retries = 3
-
-        while not self._stop_called and retry_count < max_retries:
-            self._capture_proc = proc = AsyncProcess(
-                capture_cmd, stdout=False, stderr=True, name=f"audio-capture[{self.friendly_name}]"
-            )
-            
-            try:
-                await proc.start()
-
-                # Signal that capture has started
-                if not self._capture_started.is_set():
-                    self._capture_started.set()
-
-                # Collect stderr output to understand what's failing
-                stderr_lines = []
-                async for line in proc.iter_stderr():
-                    stderr_lines.append(line)
-                    # Only log actual errors, not normal operational messages
-                    if "broken pipe" in line.lower():
-                        # Broken pipe is normal when no player is reading the stream
-                        self.logger.debug("Broken pipe (normal when no player is reading): %s", line)
-                    elif "overrun" in line.lower():
-                        # Overruns are normal when no one is reading the stream
-                        self.logger.debug("Audio buffer overrun (normal when stream not active): %s", line)
-                    elif any(error_keyword in line.lower() for error_keyword in ['error', 'failed', 'cannot', 'unable']):
-                        # Only log actual errors that aren't broken pipe related
-                        if "broken pipe" not in line.lower():
-                            self.logger.warning("Capture stderr: %s", line)
-                    else:
-                        # Log other messages at debug level
-                        self.logger.debug("Capture info: %s", line)
-
-                # Wait for process to complete and get return code
-                return_code = await proc.wait()
-                
-                if return_code != 0:
-                    self.logger.error(
-                        "Capture process failed with return code %s. stderr output: %s",
-                        return_code,
-                        "\n".join(stderr_lines[-10:])  # Last 10 lines
-                    )
-                    
-                    # Check if it's a device issue
-                    stderr_text = "\n".join(stderr_lines)
-                    if "No such file or directory" in stderr_text:
-                        self.logger.error("Audio device '%s' not found", self.device)
-                        break  # Don't retry for device issues
-                    elif "Device or resource busy" in stderr_text:
-                        self.logger.error("Device already in use: Audio device '%s' is currently being used by another application or Music Assistant instance. Please select a different audio input device.", self.device)
-                        break  # Don't retry for device issues
-                    
-                await proc.close(True)
-                
-            except Exception as err:
-                self.logger.error("Exception in capture process: %s", err)
-                with suppress(Exception):
-                    await proc.close(True)
-            
-            if self._stop_called:
-                break
-                
-            retry_count += 1
-            if retry_count < max_retries:
-                self.logger.warning("Capture process stopped unexpectedly – retrying in 5 s… (attempt %d/%d)", retry_count + 1, max_retries)
-                # Clean up pipe before retry
-                await self._cleanup_pipe()
-                await asyncio.sleep(5)
-                # Recreate pipe for next attempt
-                try:
-                    await check_output("mkfifo", self.named_pipe)
-                except Exception as err:
-                    self.logger.error("Failed to recreate named pipe %s: %s", self.named_pipe, err)
-                    break
-            else:
-                self.logger.error("Max retries reached, stopping capture daemon")
-                break
-
-        # Final clean-up
-        await self._cleanup_pipe()
