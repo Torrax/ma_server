@@ -6,9 +6,11 @@ Captures raw PCM from a user-selected ALSA / PulseAudio / PipeWire input
 (via FFmpeg) and exposes it as a low-latency CUSTOM stream (PCM S16LE).
 
 - No encode/decode delay (raw PCM)
-- FFmpeg low-latency capture flags (nobuffer/low_delay, tiny probe)
+- FFmpeg low-latency capture flags + input-side -ac/-ar
+- Auto-fallback from hw:N,M -> plughw:N,M
+- Preflight device-open test with explicit logging
+- Drains FFmpeg stderr (when supported by AsyncProcess) so you see errors
 - ~20 ms frame-aligned chunking
-- Aggressive logging at every step (without assuming model field names)
 
 Author: you (@Torrax)
 """
@@ -65,7 +67,6 @@ CONF_THUMBNAIL_IMAGE = "thumbnail_image"       # Image URL (optional)
 DEFAULT_SR = 48000
 DEFAULT_CHANNELS = 2
 
-
 # ------------------------------------------------------------------
 # PROVIDER SET-UP / CONFIG DIALOG
 # ------------------------------------------------------------------
@@ -91,16 +92,12 @@ async def get_config_entries(
     device_options = await _get_available_input_devices()
     LOGGER.info("Device discovery returned %d option(s)", len(device_options))
     for idx, opt in enumerate(device_options):
-        # Do NOT assume attributes (label/value) exist on this build.
         name = getattr(opt, "label", None) or getattr(opt, "name", None) or repr(opt)
         val = getattr(opt, "value", None)
         LOGGER.debug("Device option %d: %s -> %s", idx, name, val)
 
-    # Determine a safe default value without assuming .value exists
-    if device_options:
-        first_opt_val = getattr(device_options[0], "value", device_options[0])
-    else:
-        first_opt_val = "alsa:default"
+    # Determine safe default
+    first_opt_val = getattr(device_options[0], "value", device_options[0]) if device_options else "alsa:default"
     LOGGER.info("Default input device initial value resolved to %s", first_opt_val)
 
     entries = (
@@ -142,7 +139,6 @@ async def get_config_entries(
             label="Channels",
             default_value=DEFAULT_CHANNELS,
             required=True,
-            # Keep positional construction; UI will read fields on its side.
             options=[ConfigValueOption("Mono", 1), ConfigValueOption("Stereo", 2)],
         ),
     )
@@ -151,15 +147,11 @@ async def get_config_entries(
 
 
 async def _get_available_input_devices() -> list[ConfigValueOption]:
-    """Scan for available audio input devices (best effort).
-
-    Prefer ALSA list via `arecord -l`. If unavailable, try `ffmpeg -sources alsa`.
-    Fall back to a couple of generic options.
-    """
+    """Scan for available audio input devices (best effort)."""
     LOGGER.info("_get_available_input_devices() starting")
     devices: list[ConfigValueOption] = []
 
-    # Try ALSA capture cards via arecord -l
+    # arecord -l
     try:
         LOGGER.debug("Attempting device scan via `arecord -l`")
         returncode, output = await check_output("arecord", "-l")
@@ -171,10 +163,7 @@ async def _get_available_input_devices() -> list[ConfigValueOption]:
                     try:
                         card_no = line.split("card ")[1].split(":")[0].strip()
                         dev_no = line.split("device ")[1].split(":")[0].strip()
-                        if ": " in line:
-                            friendly = line.split(": ", 1)[1].strip()
-                        else:
-                            friendly = f"Card {card_no} Device {dev_no}"
+                        friendly = line.split(": ", 1)[1].strip() if ": " in line else f"Card {card_no} Device {dev_no}"
                         value = f"alsa:hw:{card_no},{dev_no}"
                         label = f"ALSA {friendly}"
                         LOGGER.debug("Detected ALSA device: %s -> %s", label, value)
@@ -184,7 +173,7 @@ async def _get_available_input_devices() -> list[ConfigValueOption]:
     except Exception as err:
         LOGGER.info("arecord not available or failed: %s", err)
 
-    # Try FFmpeg device enumeration for ALSA as a fallback
+    # ffmpeg -sources alsa fallback
     if not devices:
         try:
             LOGGER.debug("Attempting device scan via `ffmpeg -sources alsa`")
@@ -207,7 +196,7 @@ async def _get_available_input_devices() -> list[ConfigValueOption]:
         except Exception as err:
             LOGGER.info("ffmpeg -sources alsa not available or failed: %s", err)
 
-    # Generic fallbacks (Pulse/PipeWire default routes; FFmpeg will resolve)
+    # Generic defaults
     if not devices:
         LOGGER.debug("Falling back to generic defaults")
         devices = [
@@ -258,19 +247,16 @@ class AudioInputProvider(PluginProvider):
         self._capture_started = asyncio.Event()
         self._on_unload_callbacks: list[callable] = []
 
-        # Metadata (minimal; robust)
+        # Metadata
         metadata = PlayerMedia("Live Audio Input")
         if self.thumbnail_image and self.thumbnail_image.startswith(("http://", "https://")):
-            try:
+            with suppress(Exception):
                 setattr(metadata, "image_url", self.thumbnail_image)
-                LOGGER.info("Thumbnail URL set on metadata")
-            except Exception as err:
-                LOGGER.warning("Failed setting thumbnail URL on metadata: %s", err)
 
         self._source_details = PluginSource(
             id=self.instance_id,
             name=self.friendly_name,
-            passive=False,                   # non-passive so users can pick it directly
+            passive=False,
             can_play_pause=False,
             can_seek=False,
             can_next_previous=False,
@@ -283,7 +269,7 @@ class AudioInputProvider(PluginProvider):
             ),
             metadata=metadata,
             stream_type=StreamType.CUSTOM,
-            path="",  # not used for CUSTOM
+            path="",
         )
 
         LOGGER.info(
@@ -299,43 +285,29 @@ class AudioInputProvider(PluginProvider):
         return {ProviderFeature.AUDIO_SOURCE}
 
     async def handle_async_init(self) -> None:
-        """Called when MA is ready."""
         LOGGER.info("handle_async_init(): provider ready")
 
     async def unload(self, is_removed: bool = False) -> None:
-        """Tear down."""
         LOGGER.info("unload() called; is_removed=%s", is_removed)
         self._stop_called = True
-
-        # Stop capture process (if any active CUSTOM stream)
         if self._capture_proc and not self._capture_proc.closed:
             LOGGER.info("Closing capture process for %s", self.friendly_name)
             with suppress(Exception):
                 await self._capture_proc.close(True)
-        else:
-            LOGGER.debug("No active capture process to close")
-
-        # Cancel background runner if ever used
         if self._runner_task and not self._runner_task.done():
             LOGGER.info("Cancelling runner task")
             self._runner_task.cancel()
             with suppress(asyncio.CancelledError):
                 await self._runner_task
-        else:
-            LOGGER.debug("No runner task to cancel")
-
-        # Run any cleanup callbacks
         for idx, cb in enumerate(self._on_unload_callbacks):
             with suppress(Exception):
                 LOGGER.debug("Running on_unload callback #%d", idx)
                 cb()
-
         LOGGER.info("unload() complete for %s", self.friendly_name)
 
     # ---------------- PluginProvider hooks ----------------
 
     def get_source(self) -> PluginSource:
-        """Expose this input as a PlayerSource (CUSTOM stream)."""
         LOGGER.info("get_source() called; returning PluginSource id=%s", self._source_details.id)
         return self._source_details
 
@@ -343,7 +315,7 @@ class AudioInputProvider(PluginProvider):
         """Yield raw PCM (S16LE) from FFmpeg into MA (CUSTOM stream)."""
         LOGGER.info("get_audio_stream() called for player_id=%s", player_id)
 
-        # Try to log the target player detail
+        # Log target player
         try:
             player = self.mass.players.get(player_id)
             LOGGER.info(
@@ -355,7 +327,7 @@ class AudioInputProvider(PluginProvider):
         except Exception as err:
             LOGGER.warning("Failed to resolve player details for %s: %s", player_id, err)
 
-        # Preflight: ffmpeg availability
+        # ffmpeg availability
         try:
             rc, ver_out = await check_output("ffmpeg", "-version")
             LOGGER.info("ffmpeg -version rc=%s", rc)
@@ -369,6 +341,43 @@ class AudioInputProvider(PluginProvider):
             LOGGER.error("ffmpeg not available: %s", err)
             return
 
+        # If ALSA hw: is used, try plughw: fallback if preflight fails
+        in_fmt, in_dev = self._ff_in_format, self._ff_in_device
+        try_plughw = (in_fmt == "alsa" and in_dev.startswith("hw:"))
+        tested_dev = in_dev
+
+        # Preflight open test (captures to null for 0.25s). We don’t need stderr,
+        # just OK/non-OK — main run will drain stderr if supported.
+        preflight_cmd = [
+            "ffmpeg", "-hide_banner", "-nostdin", "-v", "error",
+            "-f", in_fmt,
+            "-ac", str(self.channels),             # APPLY TO INPUT (placed before -i)
+            "-ar", str(self.sample_rate),          # APPLY TO INPUT
+            "-i", in_dev,
+            "-t", "0.25",
+            "-f", "null", "-"                      # throw away
+        ]
+        LOGGER.info("Preflight: %s", " ".join(preflight_cmd))
+        try:
+            rc, _ = await check_output(*preflight_cmd)
+            LOGGER.info("Preflight result rc=%s (0 means OK)", rc)
+            if rc != 0 and try_plughw:
+                alt = in_dev.replace("hw:", "plughw:", 1)
+                LOGGER.warning("Preflight failed on %s; retrying with %s", in_dev, alt)
+                preflight_cmd_alt = preflight_cmd.copy()
+                preflight_cmd_alt[preflight_cmd_alt.index(in_dev)] = alt
+                rc2, _ = await check_output(*preflight_cmd_alt)
+                LOGGER.info("Preflight (plughw) rc=%s", rc2)
+                if rc2 == 0:
+                    tested_dev = alt
+        except Exception as err:
+            LOGGER.warning("Preflight exception: %s", err)
+            if try_plughw:
+                alt = in_dev.replace("hw:", "plughw:", 1)
+                LOGGER.warning("Switching to %s due to preflight exception", alt)
+                tested_dev = alt
+
+        # Stream params
         bytes_per_sec = self.sample_rate * self.channels * 2  # 16-bit PCM
         frame_bytes = self.channels * 2
         chunk_size = max(1024, (bytes_per_sec // 50) // frame_bytes * frame_bytes)  # ~20 ms
@@ -381,29 +390,50 @@ class AudioInputProvider(PluginProvider):
         cmd = [
             "ffmpeg",
             "-hide_banner",
-            "-v", "warning",             # we won't capture stderr; keep noise moderate
-            "-f", self._ff_in_format,
+            "-nostdin",
+            "-v", "warning",
+            "-f", in_fmt,
+            "-ac", str(self.channels),             # INPUT SIDE
+            "-ar", str(self.sample_rate),          # INPUT SIDE
             "-thread_queue_size", "512",
             "-fflags", "nobuffer",
             "-flags", "low_delay",
             "-analyzeduration", "0",
             "-probesize", "32",
-            "-i", self._ff_in_device,
-            "-ac", str(self.channels),
-            "-ar", str(self.sample_rate),
-            "-f", "s16le", "-",          # raw PCM to stdout
+            "-i", tested_dev,
+            "-f", "s16le", "-",                    # raw PCM to stdout
         ]
         LOGGER.info("Launching FFmpeg: %s", " ".join(cmd))
 
         self._capture_proc = proc = AsyncProcess(
             cmd,
-            stdout=True,    # read PCM from stdout
-            stderr=False,   # DO NOT capture stderr unless we drain it; we set -v warning
+            stdout=True,
+            stderr=True,  # we will drain stderr in a background task if supported
             name=f"audio-capture[{self.friendly_name}]"
         )
+        stderr_task: asyncio.Task | None = None
         try:
             await proc.start()
             LOGGER.info("FFmpeg process started (pid=%s)", getattr(proc, "pid", None))
+
+            # Start stderr drain if available
+            if hasattr(proc, "iter_stderr"):
+                async def _drain_stderr() -> None:
+                    try:
+                        async for line in proc.iter_stderr():  # type: ignore[attr-defined]
+                            try:
+                                txt = line.decode("utf-8", "ignore").rstrip()
+                            except Exception:
+                                txt = str(line)
+                            if txt:
+                                LOGGER.warning("ffmpeg[stderr]: %s", txt)
+                    except Exception as e:
+                        LOGGER.debug("stderr drain ended: %s", e)
+                stderr_task = asyncio.create_task(_drain_stderr())
+                LOGGER.debug("Started stderr drain task")
+            else:
+                LOGGER.debug("AsyncProcess has no iter_stderr(); stderr drain disabled")
+
         except Exception as err:
             LOGGER.error("Failed to start ffmpeg: %s", err)
             return
@@ -423,11 +453,9 @@ class AudioInputProvider(PluginProvider):
                 total_bytes += chunk_len
                 chunk_count += 1
 
-                # DEBUG SPAM (first 10 chunks)
                 if chunk_count <= 10:
                     LOGGER.debug("Chunk #%d len=%d", chunk_count, chunk_len)
 
-                # Periodic throughput log (1s)
                 now = time.monotonic()
                 if now - last_log_ts >= 1.0:
                     elapsed = now - start_ts
@@ -452,6 +480,10 @@ class AudioInputProvider(PluginProvider):
         finally:
             with suppress(Exception):
                 await proc.close(True)
+            if stderr_task and not stderr_task.done():
+                stderr_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await stderr_task
             self._capture_proc = None
             elapsed = time.monotonic() - start_ts
             LOGGER.info(
@@ -464,12 +496,12 @@ class AudioInputProvider(PluginProvider):
     def _parse_device_string(self, device: str) -> tuple[str, str]:
         """Return (ff_input_format, ff_input_device) from a user device string.
 
-        Supported examples:
+        Examples:
           - "alsa:hw:1,0"      -> ("alsa", "hw:1,0")
           - "alsa:default"     -> ("alsa", "default")
           - "pulse:default"    -> ("pulse", "default")
-          - "default"          -> ("alsa", "default")
-          - "pipewire:default" -> ("pulse", "default")   # common via PA shim
+          - "pipewire:default" -> ("pulse", "default")   # via PA shim
+          - "default" or ""    -> ("alsa", "default")
         """
         dev = (device or "").strip()
         LOGGER.debug("_parse_device_string() input=%s", dev)
@@ -478,12 +510,10 @@ class AudioInputProvider(PluginProvider):
         elif dev.startswith("pulse:"):
             result = ("pulse", dev[6:] or "default")
         elif dev.startswith("pipewire:"):
-            # FFmpeg usually sees PipeWire via the PulseAudio compat layer
             result = ("pulse", dev[9:] or "default")
         elif dev == "default" or dev == "":
             result = ("alsa", "default")
         else:
-            # Fallback: assume ALSA token (e.g. "hw:1,0")
             result = ("alsa", dev)
         LOGGER.debug("_parse_device_string() result=%s", result)
         return result
