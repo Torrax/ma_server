@@ -8,7 +8,7 @@ Captures raw PCM from a user-selected ALSA / PulseAudio / PipeWire input
 - No encode/decode delay (raw PCM)
 - FFmpeg low-latency capture flags (nobuffer/low_delay, tiny probe)
 - ~20 ms frame-aligned chunking
-- Aggressive logging at every step so you can trace issues instantly
+- Aggressive logging at every step (without assuming model field names)
 
 Author: you (@Torrax)
 """
@@ -74,7 +74,7 @@ async def setup(
     mass: MusicAssistant, manifest: ProviderManifest, config: ProviderConfig
 ) -> ProviderInstanceType:
     """Create plugin instance."""
-    LOGGER.info("setup() called for live_audio_input; manifest=%s", getattr(manifest, "domain", None))
+    LOGGER.info("setup() called for live_audio_input; domain=%s", getattr(manifest, "domain", None))
     provider = AudioInputProvider(mass, manifest, config)
     LOGGER.info("setup() created AudioInputProvider instance id=%s", provider.instance_id)
     return provider
@@ -91,7 +91,17 @@ async def get_config_entries(
     device_options = await _get_available_input_devices()
     LOGGER.info("Device discovery returned %d option(s)", len(device_options))
     for idx, opt in enumerate(device_options):
-        LOGGER.debug("Device option %d: name=%s value=%s", idx, opt.label, opt.value)
+        # Do NOT assume attributes (label/value) exist on this build.
+        name = getattr(opt, "label", None) or getattr(opt, "name", None) or repr(opt)
+        val = getattr(opt, "value", None)
+        LOGGER.debug("Device option %d: %s -> %s", idx, name, val)
+
+    # Determine a safe default value without assuming .value exists
+    if device_options:
+        first_opt_val = getattr(device_options[0], "value", device_options[0])
+    else:
+        first_opt_val = "alsa:default"
+    LOGGER.info("Default input device initial value resolved to %s", first_opt_val)
 
     entries = (
         CONF_ENTRY_WARN_PREVIEW,
@@ -116,7 +126,7 @@ async def get_config_entries(
             label="Audio Input Device",
             description="Pick an input device (ALSA/Pulse/PipeWire via FFmpeg).",
             options=device_options,
-            default_value=device_options[0].value if device_options else "alsa:default",
+            default_value=first_opt_val,
             required=True,
         ),
         ConfigEntry(
@@ -132,6 +142,7 @@ async def get_config_entries(
             label="Channels",
             default_value=DEFAULT_CHANNELS,
             required=True,
+            # Keep positional construction; UI will read fields on its side.
             options=[ConfigValueOption("Mono", 1), ConfigValueOption("Stereo", 2)],
         ),
     )
