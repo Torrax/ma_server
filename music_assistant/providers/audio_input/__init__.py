@@ -2,15 +2,15 @@
 Live-Audio-Input plugin for Music Assistant
 ===========================================
 
-Captures raw PCM from a user-selected ALSA / PulseAudio / PipeWire input
-(via FFmpeg) and exposes it as a low-latency CUSTOM stream (PCM S16LE).
+Captures raw PCM from a user-selected input device via FFmpeg and exposes it
+as a low-latency CUSTOM stream (PCM S16LE).
 
-- No encode/decode delay (raw PCM)
-- FFmpeg low-latency capture flags + input-side -ac/-ar
-- Auto-fallback from hw:N,M -> plughw:N,M
-- Preflight device-open test with explicit logging
-- Drains FFmpeg stderr (when supported by AsyncProcess) so you see errors
-- ~20 ms frame-aligned chunking
+Key points:
+- Auto-detect FFmpeg input device backends (alsa/pulse/jack/pipewire shim)
+- If ALSA isn't compiled in (your case), falls back to PulseAudio automatically
+- Preflight each candidate (-t 0.25 to null) to ensure it opens, with logs
+- Drains FFmpeg stderr so you see errors (permissions, busy, unknown device)
+- ~20 ms frame-aligned chunking; no encode/decode delay (raw PCM)
 
 Author: you (@Torrax)
 """
@@ -96,8 +96,8 @@ async def get_config_entries(
         val = getattr(opt, "value", None)
         LOGGER.debug("Device option %d: %s -> %s", idx, name, val)
 
-    # Determine safe default
-    first_opt_val = getattr(device_options[0], "value", device_options[0]) if device_options else "alsa:default"
+    # Determine safe default value
+    first_opt_val = getattr(device_options[0], "value", device_options[0]) if device_options else "pulse:default"
     LOGGER.info("Default input device initial value resolved to %s", first_opt_val)
 
     entries = (
@@ -121,7 +121,7 @@ async def get_config_entries(
             key=CONF_INPUT_DEVICE,
             type=ConfigEntryType.STRING,
             label="Audio Input Device",
-            description="Pick an input device (ALSA/Pulse/PipeWire via FFmpeg).",
+            description="Pick an input device token (e.g., alsa:hw:1,0 or pulse:<source name>).",
             options=device_options,
             default_value=first_opt_val,
             required=True,
@@ -151,57 +151,46 @@ async def _get_available_input_devices() -> list[ConfigValueOption]:
     LOGGER.info("_get_available_input_devices() starting")
     devices: list[ConfigValueOption] = []
 
-    # arecord -l
+    # ALSA via arecord -l
     try:
         LOGGER.debug("Attempting device scan via `arecord -l`")
-        returncode, output = await check_output("arecord", "-l")
-        LOGGER.debug("arecord returned rc=%s", returncode)
-        if returncode == 0:
-            lines = output.decode("utf-8", "ignore").splitlines()
-            for line in lines:
+        rc, out = await check_output("arecord", "-l")
+        LOGGER.debug("arecord returned rc=%s", rc)
+        if rc == 0:
+            for line in out.decode("utf-8", "ignore").splitlines():
                 if "card " in line and "device " in line:
                     try:
                         card_no = line.split("card ")[1].split(":")[0].strip()
                         dev_no = line.split("device ")[1].split(":")[0].strip()
                         friendly = line.split(": ", 1)[1].strip() if ": " in line else f"Card {card_no} Device {dev_no}"
-                        value = f"alsa:hw:{card_no},{dev_no}"
-                        label = f"ALSA {friendly}"
-                        LOGGER.debug("Detected ALSA device: %s -> %s", label, value)
-                        devices.append(ConfigValueOption(label, value))
+                        devices.append(ConfigValueOption(f"ALSA {friendly}", f"alsa:hw:{card_no},{dev_no}"))
                     except Exception as err:
                         LOGGER.warning("Failed to parse arecord line: %s; err=%s", line, err)
     except Exception as err:
         LOGGER.info("arecord not available or failed: %s", err)
 
-    # ffmpeg -sources alsa fallback
-    if not devices:
-        try:
-            LOGGER.debug("Attempting device scan via `ffmpeg -sources alsa`")
-            returncode, output = await check_output("ffmpeg", "-hide_banner", "-sources", "alsa")
-            LOGGER.debug("ffmpeg -sources returned rc=%s", returncode)
-            if returncode == 0:
-                lines = output.decode("utf-8", "ignore").splitlines()
-                seen = set()
-                for line in lines:
-                    for token in line.replace(",", " ").split():
-                        if token.startswith("hw:") and token not in seen:
-                            seen.add(token)
-                            value = f"alsa:{token}"
-                            label = f"ALSA {token}"
-                            LOGGER.debug("Detected FFmpeg ALSA token: %s", token)
-                            devices.append(ConfigValueOption(label, value))
-                if not devices:
-                    LOGGER.debug("No explicit hw tokens found; adding ALSA default")
-                    devices.append(ConfigValueOption("ALSA default", "alsa:default"))
-        except Exception as err:
-            LOGGER.info("ffmpeg -sources alsa not available or failed: %s", err)
+    # PulseAudio sources via ffmpeg -sources pulse
+    try:
+        LOGGER.debug("Attempting PulseAudio source enumeration via `ffmpeg -sources pulse`")
+        rc, out = await check_output("ffmpeg", "-hide_banner", "-sources", "pulse")
+        LOGGER.debug("ffmpeg -sources pulse rc=%s", rc)
+        if rc == 0:
+            for line in out.decode("utf-8", "ignore").splitlines():
+                line = line.strip()
+                # Lines can include source names like "alsa_input.usb-XYZ-00.mono-fallback"
+                if line and not line.startswith(("#", " ")) and ":" not in line:
+                    token = line
+                    label = f"Pulse {token}"
+                    devices.append(ConfigValueOption(label, f"pulse:{token}"))
+    except Exception as err:
+        LOGGER.info("ffmpeg -sources pulse failed or unsupported: %s", err)
 
-    # Generic defaults
+    # Fallback defaults
     if not devices:
-        LOGGER.debug("Falling back to generic defaults")
+        LOGGER.debug("No devices found; falling back to generic defaults")
         devices = [
-            ConfigValueOption("ALSA default", "alsa:default"),
             ConfigValueOption("PulseAudio default", "pulse:default"),
+            ConfigValueOption("ALSA default", "alsa:default"),
         ]
 
     LOGGER.info("_get_available_input_devices() returning %d device(s)", len(devices))
@@ -236,9 +225,9 @@ class AudioInputProvider(PluginProvider):
             self.friendly_name, self.device, self.sample_rate, self.channels, bool(self.thumbnail_image)
         )
 
-        # Parse device string for FFmpeg (-f <fmt> -i <dev>)
-        self._ff_in_format, self._ff_in_device = self._parse_device_string(self.device)
-        LOGGER.info("Parsed device: ff_format=%s ff_device=%s", self._ff_in_format, self._ff_in_device)
+        # Parse device string (may be alsa:, pulse:, etc.)
+        self._cfg_fmt, self._cfg_dev = self._parse_device_string(self.device)
+        LOGGER.info("Parsed configured device: fmt=%s dev=%s", self._cfg_fmt, self._cfg_dev)
 
         # Runtime helpers
         self._capture_proc: AsyncProcess | None = None
@@ -341,41 +330,65 @@ class AudioInputProvider(PluginProvider):
             LOGGER.error("ffmpeg not available: %s", err)
             return
 
-        # If ALSA hw: is used, try plughw: fallback if preflight fails
-        in_fmt, in_dev = self._ff_in_format, self._ff_in_device
-        try_plughw = (in_fmt == "alsa" and in_dev.startswith("hw:"))
-        tested_dev = in_dev
+        # Build candidate inputs in priority order:
+        # 1) the configured pair
+        # 2) if configured alsa hw:, add plughw:
+        # 3) if pulse backend exists, add best pulse source (non-monitor), else pulse:default
+        candidates: list[tuple[str, str, str]] = []  # (fmt, dev, reason)
+        fmt, dev = self._cfg_fmt, self._cfg_dev
+        candidates.append((fmt, dev, "configured"))
 
-        # Preflight open test (captures to null for 0.25s). We don’t need stderr,
-        # just OK/non-OK — main run will drain stderr if supported.
-        preflight_cmd = [
-            "ffmpeg", "-hide_banner", "-nostdin", "-v", "error",
-            "-f", in_fmt,
-            "-ac", str(self.channels),             # APPLY TO INPUT (placed before -i)
-            "-ar", str(self.sample_rate),          # APPLY TO INPUT
-            "-i", in_dev,
-            "-t", "0.25",
-            "-f", "null", "-"                      # throw away
-        ]
-        LOGGER.info("Preflight: %s", " ".join(preflight_cmd))
-        try:
-            rc, _ = await check_output(*preflight_cmd)
-            LOGGER.info("Preflight result rc=%s (0 means OK)", rc)
-            if rc != 0 and try_plughw:
-                alt = in_dev.replace("hw:", "plughw:", 1)
-                LOGGER.warning("Preflight failed on %s; retrying with %s", in_dev, alt)
-                preflight_cmd_alt = preflight_cmd.copy()
-                preflight_cmd_alt[preflight_cmd_alt.index(in_dev)] = alt
-                rc2, _ = await check_output(*preflight_cmd_alt)
-                LOGGER.info("Preflight (plughw) rc=%s", rc2)
-                if rc2 == 0:
-                    tested_dev = alt
-        except Exception as err:
-            LOGGER.warning("Preflight exception: %s", err)
-            if try_plughw:
-                alt = in_dev.replace("hw:", "plughw:", 1)
-                LOGGER.warning("Switching to %s due to preflight exception", alt)
-                tested_dev = alt
+        if fmt == "alsa" and dev.startswith("hw:"):
+            candidates.append(("alsa", dev.replace("hw:", "plughw:", 1), "alsa plughw fallback"))
+
+        # Detect available input devices on this ffmpeg
+        supported = await self._ffmpeg_supported_inputs()
+        LOGGER.info("ffmpeg supported input devices: %s", sorted(supported))
+
+        if "pulse" in supported:
+            pulse_dev = await self._pick_pulse_source()
+            if pulse_dev:
+                candidates.append(("pulse", pulse_dev, "auto pulse best source"))
+            candidates.append(("pulse", "default", "pulse default"))
+
+        # JACK as a last resort if present
+        if "jack" in supported:
+            candidates.append(("jack", "default", "jack default"))
+
+        # Deduplicate while preserving order
+        seen = set()
+        deduped: list[tuple[str, str, str]] = []
+        for c in candidates:
+            key = (c[0], c[1])
+            if key in seen:
+                continue
+            seen.add(key)
+            # keep only candidates with supported fmt
+            if c[0] in supported:
+                deduped.append(c)
+
+        if not deduped:
+            LOGGER.error("No supported FFmpeg input devices found on this system. Aborting stream.")
+            return
+
+        # Try each candidate with a short preflight to null; pick the first that opens.
+        chosen: tuple[str, str, str] | None = None
+        for cand_fmt, cand_dev, why in deduped:
+            rc = await self._preflight_open(cand_fmt, cand_dev)
+            LOGGER.info("Preflight %s:%s (%s) rc=%s", cand_fmt, cand_dev, why, rc)
+            if rc == 0:
+                chosen = (cand_fmt, cand_dev, why)
+                break
+
+        if not chosen:
+            LOGGER.error("All input candidates failed preflight. Check permissions or device names.")
+            # Still run the first candidate to capture stderr details for the user
+            cand_fmt, cand_dev, _ = deduped[0]
+            await self._run_and_log_once(cand_fmt, cand_dev)
+            return
+
+        in_fmt, in_dev, reason = chosen
+        LOGGER.info("Using input %s:%s (%s)", in_fmt, in_dev, reason)
 
         # Stream params
         bytes_per_sec = self.sample_rate * self.channels * 2  # 16-bit PCM
@@ -386,21 +399,21 @@ class AudioInputProvider(PluginProvider):
             self.sample_rate, self.channels, bytes_per_sec, frame_bytes, chunk_size
         )
 
-        # Build FFmpeg command with low-latency flags
+        # Build FFmpeg command with low-latency flags (INPUT side -ac/-ar)
         cmd = [
             "ffmpeg",
             "-hide_banner",
             "-nostdin",
             "-v", "warning",
             "-f", in_fmt,
-            "-ac", str(self.channels),             # INPUT SIDE
-            "-ar", str(self.sample_rate),          # INPUT SIDE
+            "-ac", str(self.channels),
+            "-ar", str(self.sample_rate),
             "-thread_queue_size", "512",
             "-fflags", "nobuffer",
             "-flags", "low_delay",
             "-analyzeduration", "0",
             "-probesize", "32",
-            "-i", tested_dev,
+            "-i", in_dev,
             "-f", "s16le", "-",                    # raw PCM to stdout
         ]
         LOGGER.info("Launching FFmpeg: %s", " ".join(cmd))
@@ -408,7 +421,7 @@ class AudioInputProvider(PluginProvider):
         self._capture_proc = proc = AsyncProcess(
             cmd,
             stdout=True,
-            stderr=True,  # we will drain stderr in a background task if supported
+            stderr=True,  # drain and log
             name=f"audio-capture[{self.friendly_name}]"
         )
         stderr_task: asyncio.Task | None = None
@@ -416,7 +429,6 @@ class AudioInputProvider(PluginProvider):
             await proc.start()
             LOGGER.info("FFmpeg process started (pid=%s)", getattr(proc, "pid", None))
 
-            # Start stderr drain if available
             if hasattr(proc, "iter_stderr"):
                 async def _drain_stderr() -> None:
                     try:
@@ -494,15 +506,7 @@ class AudioInputProvider(PluginProvider):
     # ---------------- Internals ----------------
 
     def _parse_device_string(self, device: str) -> tuple[str, str]:
-        """Return (ff_input_format, ff_input_device) from a user device string.
-
-        Examples:
-          - "alsa:hw:1,0"      -> ("alsa", "hw:1,0")
-          - "alsa:default"     -> ("alsa", "default")
-          - "pulse:default"    -> ("pulse", "default")
-          - "pipewire:default" -> ("pulse", "default")   # via PA shim
-          - "default" or ""    -> ("alsa", "default")
-        """
+        """Return (ff_input_format, ff_input_device) from a user device string."""
         dev = (device or "").strip()
         LOGGER.debug("_parse_device_string() input=%s", dev)
         if dev.startswith("alsa:"):
@@ -510,10 +514,101 @@ class AudioInputProvider(PluginProvider):
         elif dev.startswith("pulse:"):
             result = ("pulse", dev[6:] or "default")
         elif dev.startswith("pipewire:"):
+            # FFmpeg commonly sees PipeWire via PulseAudio compat layer
             result = ("pulse", dev[9:] or "default")
         elif dev == "default" or dev == "":
-            result = ("alsa", "default")
+            # Prefer pulse default when available; we’ll resolve later
+            result = ("pulse", "default")
         else:
             result = ("alsa", dev)
         LOGGER.debug("_parse_device_string() result=%s", result)
         return result
+
+    async def _ffmpeg_supported_inputs(self) -> set[str]:
+        """Parse `ffmpeg -devices` to see which input devices are compiled in."""
+        try:
+            rc, out = await check_output("ffmpeg", "-hide_banner", "-devices")
+            text = out.decode("utf-8", "ignore") if rc == 0 else ""
+        except Exception as err:
+            LOGGER.info("ffmpeg -devices failed: %s", err)
+            text = ""
+        supported: set[str] = set()
+        for line in text.splitlines():
+            # Lines look like: " D. alsa           ALSA audio input"
+            line = line.strip()
+            if line.startswith("D") or line.startswith(" D"):
+                parts = line.split()
+                if len(parts) >= 2:
+                    supported.add(parts[1])
+        if not supported:
+            # Fallback assumption: pulse is often present even if -devices parsing failed
+            supported.update({"pulse"})
+        return supported
+
+    async def _pick_pulse_source(self) -> str | None:
+        """Return the best PulseAudio source token (prefer non-monitor)."""
+        try:
+            rc, out = await check_output("ffmpeg", "-hide_banner", "-sources", "pulse")
+            if rc != 0:
+                return None
+            tokens: list[str] = []
+            for line in out.decode("utf-8", "ignore").splitlines():
+                line = line.strip()
+                if line and not line.startswith(("#", " ")):
+                    tokens.append(line)
+            # Prefer non-monitor sources
+            for t in tokens:
+                if ".monitor" not in t:
+                    LOGGER.info("Selected Pulse source: %s", t)
+                    return t
+            if tokens:
+                LOGGER.info("Only monitor sources found; using: %s", tokens[0])
+                return tokens[0]
+        except Exception as err:
+            LOGGER.info("Pulse source enumeration failed: %s", err)
+        return None
+
+    async def _preflight_open(self, fmt: str, dev: str) -> int:
+        """Try opening the input for 0.25s and writing to null; return rc."""
+        cmd = [
+            "ffmpeg", "-hide_banner", "-nostdin", "-v", "error",
+            "-f", fmt,
+            "-ac", str(self.channels),
+            "-ar", str(self.sample_rate),
+            "-i", dev,
+            "-t", "0.25",
+            "-f", "null", "-"
+        ]
+        LOGGER.info("Preflight: %s", " ".join(cmd))
+        try:
+            rc, _ = await check_output(*cmd)
+            return rc
+        except Exception as err:
+            LOGGER.warning("Preflight exception for %s:%s -> %s", fmt, dev, err)
+            return 1
+
+    async def _run_and_log_once(self, fmt: str, dev: str) -> None:
+        """Run ffmpeg briefly just to capture stderr for diagnostics."""
+        cmd = [
+            "ffmpeg", "-hide_banner", "-nostdin",
+            "-v", "warning",
+            "-f", fmt, "-ac", str(self.channels), "-ar", str(self.sample_rate),
+            "-i", dev, "-t", "0.25", "-f", "null", "-"
+        ]
+        LOGGER.info("Diagnostic run: %s", " ".join(cmd))
+        proc = AsyncProcess(cmd, stdout=True, stderr=True, name="audio-capture[diag]")
+        try:
+            await proc.start()
+            if hasattr(proc, "iter_stderr"):
+                async for line in proc.iter_stderr():  # type: ignore[attr-defined]
+                    try:
+                        txt = line.decode("utf-8", "ignore").rstrip()
+                    except Exception:
+                        txt = str(line)
+                    if txt:
+                        LOGGER.warning("ffmpeg[stderr]: %s", txt)
+        except Exception as err:
+            LOGGER.warning("Diagnostic run failed to start: %s", err)
+        finally:
+            with suppress(Exception):
+                await proc.close(True)
