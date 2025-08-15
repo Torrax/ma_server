@@ -403,7 +403,7 @@ class AudioInputProvider(PluginProvider):
             await self._restore_player_pause(player_id)
 
     async def _disable_player_pause(self, player_id: str) -> None:
-        """Disable pause functionality when our source is active."""
+        """Disable play/pause functionality when our source is active."""
         player = self.mass.players.get(player_id)
         if not player:
             return
@@ -413,11 +413,18 @@ class AudioInputProvider(PluginProvider):
         if not hasattr(player, original_attr):
             setattr(player, original_attr, player.supported_features.copy())
         
-        # Remove pause feature
-        if PlayerFeature.PAUSE in player.supported_features:
-            player.supported_features.discard(PlayerFeature.PAUSE)
+        # Remove both play and pause features to disable play/pause button completely
+        features_to_remove = {PlayerFeature.PAUSE, PlayerFeature.PLAY}
+        features_removed = []
+        
+        for feature in features_to_remove:
+            if feature in player.supported_features:
+                player.supported_features.discard(feature)
+                features_removed.append(feature.value)
+        
+        if features_removed:
             self.mass.players.update(player_id, force_update=True)
-            self.logger.debug(f"Disabled pause for player {player.display_name} (audio input active)")
+            self.logger.debug(f"Disabled {', '.join(features_removed)} for player {player.display_name} (audio input active)")
 
     async def _restore_player_pause(self, player_id: str) -> None:
         """Restore pause functionality when our source is no longer active."""
