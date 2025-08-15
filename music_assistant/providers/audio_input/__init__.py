@@ -382,6 +382,9 @@ class AudioInputProvider(PluginProvider):
         # period in seconds
         period_s = max(1, self.period_us) / 1_000_000
         chunk_size = max(256, int(bytes_per_sec * period_s))
+        
+        # Pre-generate silence chunk for paused state
+        silence_chunk = b'\x00' * chunk_size
 
         # Primary (aggressive) arecord command
         base_cmd: list[str] = [
@@ -421,23 +424,19 @@ class AudioInputProvider(PluginProvider):
                 "-"
             ])
 
-        last_err: Exception | None = None
-
         try:
-            while self._stream_active and not self._stop_called:
-                # Check if we're paused - stream silence instead of stopping
+            # Main streaming loop - NEVER EXIT unless provider is unloading
+            while not self._stop_called:
                 if self._paused:
-                    self.logger.debug("Audio input stream paused for %s, streaming silence...", self.friendly_name)
-                    # Stream silence while paused to keep the connection alive
-                    silence_chunk = b'\x00' * chunk_size  # Generate silence (zeros)
-                    while self._paused and self._stream_active and not self._stop_called:
-                        yield silence_chunk
-                        await asyncio.sleep(period_s)  # Match the expected timing
-                    if not self._stream_active or self._stop_called:
-                        break
-                    self.logger.info("Audio input stream resumed for %s, restarting arecord process", self.friendly_name)
+                    # Stream silence while paused to keep connection alive
+                    yield silence_chunk
+                    await asyncio.sleep(period_s)
+                    continue
 
-                # Start/restart the arecord process
+                # Not paused - try to start/restart arecord process
+                last_err: Exception | None = None
+                process_started = False
+                
                 for idx, cmd in enumerate(attempt_cmds, start=1):
                     F_val = cmd[cmd.index("-F")+1]
                     B_val = cmd[cmd.index("-B")+1]
@@ -451,43 +450,42 @@ class AudioInputProvider(PluginProvider):
                     try:
                         await proc.start()
                         self._capture_proc = proc
+                        process_started = True
                     except Exception as err:
                         last_err = err
                         self.logger.warning("arecord failed to start (attempt %d): %s", idx, err)
                         continue
 
-                    try:
-                        async for chunk in proc.iter_chunked(chunk_size):
-                            if not chunk or not self._stream_active or self._stop_called:
-                                break
-                            if self._paused:
-                                # Stream is paused, break to stop arecord but keep stream alive
-                                break
-                            yield chunk
-                        # If we exit the loop due to pause, break out of the attempt loop
-                        if self._paused:
-                            self.logger.info("Audio input stream paused for %s, stopping arecord process", self.friendly_name)
+                    if process_started:
+                        try:
+                            async for chunk in proc.iter_chunked(chunk_size):
+                                if not chunk or self._stop_called:
+                                    break
+                                if self._paused:
+                                    # Paused during streaming - break to stop arecord but continue main loop
+                                    self.logger.info("Audio input stream paused for %s, stopping arecord process", self.friendly_name)
+                                    break
+                                yield chunk
+                            # Process ended - break out of attempt loop
                             break
-                        # Normal EOF? break to finally: section
-                        break
-                    except Exception as err:
-                        last_err = err
-                        self.logger.warning("Error while reading arecord stream (attempt %d): %s", idx, err)
-                        # Ensure process is closed before trying next fallback
-                        with suppress(Exception):
-                            await proc.close(True)
-                        self._capture_proc = None
-                        # Try next fallback
+                        except Exception as err:
+                            last_err = err
+                            self.logger.warning("Error while reading arecord stream (attempt %d): %s", idx, err)
+                        finally:
+                            with suppress(Exception):
+                                await proc.close(True)
+                            self._capture_proc = None
+                        # Try next fallback if this attempt failed
                         continue
-                    finally:
-                        with suppress(Exception):
-                            await proc.close(True)
-                        self._capture_proc = None
 
-                # If all attempts failed and we're not paused, log error and exit
-                if last_err and not self._paused:
-                    self.logger.error("All arecord attempts failed for %s: %s", self.friendly_name, last_err)
-                    break
+                # If all attempts failed, stream silence and try again after a delay
+                if not process_started and last_err:
+                    self.logger.error("All arecord attempts failed for %s: %s - streaming silence", self.friendly_name, last_err)
+                    for _ in range(50):  # Stream silence for ~5 seconds before retrying
+                        if self._paused or self._stop_called:
+                            break
+                        yield silence_chunk
+                        await asyncio.sleep(period_s)
 
         finally:
             # Clean up monitoring task
@@ -496,16 +494,14 @@ class AudioInputProvider(PluginProvider):
                 with suppress(asyncio.CancelledError):
                     await self._monitor_task
             self._monitor_task = None
+            
+            # Clean up capture process
+            if self._capture_proc and not self._capture_proc.closed:
+                with suppress(Exception):
+                    await self._capture_proc.close(True)
+                self._capture_proc = None
 
-        # Log when the stream ends
-        self._stream_active = False
-        if self._stop_called:
-            self.logger.info("Audio stream stopped for %s - provider unloading", self.friendly_name)
-        elif self._paused:
-            self.logger.info("Audio stream paused for %s - arecord process stopped", self.friendly_name)
-        else:
-            self.logger.info("Audio stream ended for %s - arecord process terminated", self.friendly_name)
-        return
+        self.logger.info("Audio stream ended for %s - provider unloading", self.friendly_name)
 
     # ---------------- Internals ----------------
 
