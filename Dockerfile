@@ -49,6 +49,9 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 # copy the already build /app dir
 COPY --from=builder /app /app
 
+# install ALSA utils
+RUN apk add --no-cache alsa-utils
+
 # the /app contents have correct permissions but for some reason /app itself does not.
 # so apply again, but ONLY to the dir (otherwise we increase the size)
 RUN chmod 777 /app
