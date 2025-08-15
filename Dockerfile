@@ -14,6 +14,9 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 ENV VIRTUAL_ENV=/app/venv
 RUN uv venv $VIRTUAL_ENV
 
+# install ALSA utilities for arecord/aplay
+RUN apk add --no-cache alsa-utils
+
 # pre-install ALL requirements into the venv
 # comes at a cost of a slightly larger image size but is faster to start
 # because we do not have to install dependencies at runtime
