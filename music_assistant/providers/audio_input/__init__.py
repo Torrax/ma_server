@@ -5,14 +5,14 @@ Live-Audio-Input plugin for Music Assistant
 Captures raw PCM from a user-selected ALSA/Pulse (via ALSA) input and forwards it
 to a Music Assistant player through an ultra-low-latency CUSTOM stream.
 
-Author: you (@Torrax)
+Author: (@Torrax)
 """
 
 from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
-from typing import TYPE_CHECKING, Callable, cast
+from typing import TYPE_CHECKING, cast
 from collections.abc import AsyncGenerator
 
 from music_assistant_models.config_entries import (
@@ -22,8 +22,6 @@ from music_assistant_models.config_entries import (
 )
 from music_assistant_models.enums import (
     ContentType,
-    EventType,
-    PlayerFeature,
     ProviderFeature,
     StreamType,
 )
@@ -36,7 +34,6 @@ from music_assistant.models.plugin import PluginProvider, PluginSource
 
 if TYPE_CHECKING:
     from music_assistant_models.config_entries import ConfigValueType, ProviderConfig
-    from music_assistant_models.event import MassEvent
     from music_assistant_models.provider import ProviderManifest
     from music_assistant.mass import MusicAssistant
     from music_assistant.models import ProviderInstanceType
@@ -205,7 +202,6 @@ class AudioInputProvider(PluginProvider):
         self._capture_proc: AsyncProcess | None = None
         self._runner_task: asyncio.Task | None = None          # type: ignore[type-arg]
         self._stop_called = False
-        self._unsubscribe_func: Callable[[], None] | None = None
 
         # Static plugin-wide audio source definition
         metadata = PlayerMedia("Live Audio Input")
@@ -221,7 +217,7 @@ class AudioInputProvider(PluginProvider):
             id=self.instance_id,
             name=self.friendly_name,
             passive=False,                       # user-selectable source
-            can_play_pause=False,
+            can_play_pause=True,
             can_seek=False,
             can_next_previous=False,
             audio_format=AudioFormat(
@@ -244,23 +240,13 @@ class AudioInputProvider(PluginProvider):
 
     async def handle_async_init(self) -> None:
         """Called when MA is ready."""
-        # Subscribe to player update events to track when our source becomes active
-        self._unsubscribe_func = self.mass.subscribe(self._on_player_updated, EventType.PLAYER_UPDATED)
+        # No background capture for CUSTOM streams.
         return
 
     async def unload(self, is_removed: bool = False) -> None:
         """Tear down."""
         self.logger.info("Unloading audio input provider %s", self.friendly_name)
         self._stop_called = True
-
-        # Restore pause functionality for all players that might have it disabled
-        for player in self.mass.players.all():
-            await self._restore_player_pause(player.player_id)
-
-        # Unsubscribe from events
-        if self._unsubscribe_func:
-            self._unsubscribe_func()
-            self._unsubscribe_func = None
 
         # Stop the capture process first (if any active CUSTOM stream)
         if self._capture_proc and not self._capture_proc.closed:
@@ -383,63 +369,10 @@ class AudioInputProvider(PluginProvider):
 
         if last_err:
             self.logger.error("All arecord attempts failed for %s: %s", self.friendly_name, last_err)
+        
+        # Log when the stream ends (pause/stop was called)
+        self.logger.info("Audio stream ended for %s - arecord process terminated", self.friendly_name)
         return
-
-    # ---------------- Play/Pause Button Control ----------------
-
-    async def _on_player_updated(self, event: MassEvent) -> None:
-        """Handle player update events to manage play/pause button state."""
-        player = event.data
-        if not player:
-            return
-        
-        player_id = player.player_id
-        current_source = player.active_source
-        
-        # Check if our source is now active
-        if current_source == self.instance_id:
-            await self._disable_player_pause(player_id)
-        else:
-            await self._restore_player_pause(player_id)
-
-    async def _disable_player_pause(self, player_id: str) -> None:
-        """Disable play/pause functionality when our source is active."""
-        player = self.mass.players.get(player_id)
-        if not player:
-            self.logger.warning(f"Player {player_id} not found when trying to disable pause")
-            return
-        
-        self.logger.info(f"Attempting to disable pause for player {player.display_name} (source: {player.active_source})")
-        self.logger.info(f"Player features before: {player.supported_features}")
-        
-        # Store original features if not already stored
-        original_attr = f'_audio_input_original_features_{self.instance_id}'
-        if not hasattr(player, original_attr):
-            setattr(player, original_attr, player.supported_features.copy())
-            self.logger.info(f"Stored original features: {getattr(player, original_attr)}")
-        
-        # Remove pause feature to disable play/pause button
-        if PlayerFeature.PAUSE in player.supported_features:
-            player.supported_features.discard(PlayerFeature.PAUSE)
-            self.mass.players.update(player_id, force_update=True)
-            self.logger.info(f"Disabled PAUSE for player {player.display_name} - features now: {player.supported_features}")
-        else:
-            self.logger.warning(f"Player {player.display_name} does not have PAUSE feature to remove")
-
-    async def _restore_player_pause(self, player_id: str) -> None:
-        """Restore pause functionality when our source is no longer active."""
-        player = self.mass.players.get(player_id)
-        if not player:
-            return
-        
-        # Restore original features if they were stored
-        original_attr = f'_audio_input_original_features_{self.instance_id}'
-        if hasattr(player, original_attr):
-            original_features = getattr(player, original_attr)
-            player.supported_features = original_features.copy()
-            delattr(player, original_attr)
-            self.mass.players.update(player_id, force_update=True)
-            self.logger.debug(f"Restored pause for player {player.display_name} (audio input inactive)")
 
     # ---------------- Internals ----------------
 
