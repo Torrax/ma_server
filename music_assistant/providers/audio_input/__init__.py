@@ -204,6 +204,7 @@ class AudioInputProvider(PluginProvider):
         self._capture_proc: AsyncProcess | None = None
         self._runner_task: asyncio.Task | None = None          # type: ignore[type-arg]
         self._stop_called = False
+        self._unsubscribe_func: Callable[[], None] | None = None
 
         # Static plugin-wide audio source definition
         metadata = PlayerMedia("Live Audio Input")
@@ -243,7 +244,7 @@ class AudioInputProvider(PluginProvider):
     async def handle_async_init(self) -> None:
         """Called when MA is ready."""
         # Subscribe to player update events to track when our source becomes active
-        self.mass.subscribe(EventType.PLAYER_UPDATED, self._on_player_updated)
+        self._unsubscribe_func = self.mass.subscribe(self._on_player_updated, EventType.PLAYER_UPDATED)
         return
 
     async def unload(self, is_removed: bool = False) -> None:
@@ -256,7 +257,9 @@ class AudioInputProvider(PluginProvider):
             await self._restore_player_pause(player.player_id)
 
         # Unsubscribe from events
-        self.mass.unsubscribe(EventType.PLAYER_UPDATED, self._on_player_updated)
+        if self._unsubscribe_func:
+            self._unsubscribe_func()
+            self._unsubscribe_func = None
 
         # Stop the capture process first (if any active CUSTOM stream)
         if self._capture_proc and not self._capture_proc.closed:
