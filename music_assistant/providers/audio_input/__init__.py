@@ -36,6 +36,7 @@ from music_assistant.models.plugin import PluginProvider, PluginSource
 
 if TYPE_CHECKING:
     from music_assistant_models.config_entries import ConfigValueType, ProviderConfig
+    from music_assistant_models.event import MassEvent
     from music_assistant_models.provider import ProviderManifest
     from music_assistant.mass import MusicAssistant
     from music_assistant.models import ProviderInstanceType
@@ -386,9 +387,9 @@ class AudioInputProvider(PluginProvider):
 
     # ---------------- Play/Pause Button Control ----------------
 
-    async def _on_player_updated(self, event_data) -> None:
+    async def _on_player_updated(self, event: MassEvent) -> None:
         """Handle player update events to manage play/pause button state."""
-        player = event_data.get("data")
+        player = event.data
         if not player:
             return
         
