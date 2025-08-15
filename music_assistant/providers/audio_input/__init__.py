@@ -5,7 +5,7 @@ Live-Audio-Input plugin for Music Assistant
 Captures raw PCM from a user-selected ALSA/Pulse (via ALSA) input and forwards it
 to a Music Assistant player through an ultra-low-latency CUSTOM stream.
 
-Author: you (@Torrax)
+Author: (@Torrax)
 """
 
 from __future__ import annotations
@@ -81,7 +81,7 @@ async def get_config_entries(
         ConfigEntry(
             key="display_section",
             type=ConfigEntryType.LABEL,
-            label="------ DISPLAY ------",
+            label="------------ DISPLAY ------------",
         ),
         ConfigEntry(
             key=CONF_FRIENDLY_NAME,
@@ -101,7 +101,7 @@ async def get_config_entries(
         ConfigEntry(
             key="audio_section",
             type=ConfigEntryType.LABEL,
-            label="----- AUDIO -----",
+            label="------------- AUDIO -------------",
         ),
         ConfigEntry(
             key=CONF_INPUT_DEVICE,
