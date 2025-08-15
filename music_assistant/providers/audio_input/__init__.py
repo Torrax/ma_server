@@ -406,25 +406,25 @@ class AudioInputProvider(PluginProvider):
         """Disable play/pause functionality when our source is active."""
         player = self.mass.players.get(player_id)
         if not player:
+            self.logger.warning(f"Player {player_id} not found when trying to disable pause")
             return
+        
+        self.logger.info(f"Attempting to disable pause for player {player.display_name} (source: {player.active_source})")
+        self.logger.info(f"Player features before: {player.supported_features}")
         
         # Store original features if not already stored
         original_attr = f'_audio_input_original_features_{self.instance_id}'
         if not hasattr(player, original_attr):
             setattr(player, original_attr, player.supported_features.copy())
+            self.logger.info(f"Stored original features: {getattr(player, original_attr)}")
         
-        # Remove both play and pause features to disable play/pause button completely
-        features_to_remove = {PlayerFeature.PAUSE, PlayerFeature.PLAY}
-        features_removed = []
-        
-        for feature in features_to_remove:
-            if feature in player.supported_features:
-                player.supported_features.discard(feature)
-                features_removed.append(feature.value)
-        
-        if features_removed:
+        # Remove pause feature to disable play/pause button
+        if PlayerFeature.PAUSE in player.supported_features:
+            player.supported_features.discard(PlayerFeature.PAUSE)
             self.mass.players.update(player_id, force_update=True)
-            self.logger.debug(f"Disabled {', '.join(features_removed)} for player {player.display_name} (audio input active)")
+            self.logger.info(f"Disabled PAUSE for player {player.display_name} - features now: {player.supported_features}")
+        else:
+            self.logger.warning(f"Player {player.display_name} does not have PAUSE feature to remove")
 
     async def _restore_player_pause(self, player_id: str) -> None:
         """Restore pause functionality when our source is no longer active."""
