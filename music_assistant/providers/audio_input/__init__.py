@@ -266,25 +266,24 @@ class AudioInputProvider(PluginProvider):
                 # Check if player state changed
                 if previous_state != current_state:
                     if current_state == PlayerState.PAUSED and not self._paused:
-                        self.logger.info("Player %s paused - stopping audio input stream for %s", player_id, self.friendly_name)
+                        self.logger.info("Player %s paused - stopping arecord process for %s (streaming silence)", player_id, self.friendly_name)
                         self._paused = True
-                        # Stop the capture process
+                        # Stop the capture process but keep stream alive
                         if self._capture_proc and not self._capture_proc.closed:
                             with suppress(Exception):
                                 await self._capture_proc.close(True)
                             self._capture_proc = None
                     elif current_state == PlayerState.PLAYING and self._paused:
-                        self.logger.info("Player %s resumed - restarting audio input stream for %s", player_id, self.friendly_name)
+                        self.logger.info("Player %s resumed - restarting arecord process for %s", player_id, self.friendly_name)
                         self._paused = False
-                    elif current_state == PlayerState.IDLE and self._stream_active:
-                        self.logger.info("Player %s stopped - stopping audio input stream for %s", player_id, self.friendly_name)
-                        self._stream_active = False
-                        # Stop the capture process
+                    elif current_state == PlayerState.IDLE:
+                        self.logger.info("Player %s stopped - pausing arecord process for %s (streaming silence)", player_id, self.friendly_name)
+                        self._paused = True
+                        # Stop the capture process but keep stream alive for quick restart
                         if self._capture_proc and not self._capture_proc.closed:
                             with suppress(Exception):
                                 await self._capture_proc.close(True)
                             self._capture_proc = None
-                        break
                 
                 previous_state = current_state
                 await asyncio.sleep(0.2)  # Check every 200ms
@@ -426,12 +425,14 @@ class AudioInputProvider(PluginProvider):
 
         try:
             while self._stream_active and not self._stop_called:
-                # Check if we're paused
+                # Check if we're paused - stream silence instead of stopping
                 if self._paused:
-                    self.logger.debug("Audio input stream paused for %s, waiting for resume...", self.friendly_name)
-                    # Wait for resume or stop
+                    self.logger.debug("Audio input stream paused for %s, streaming silence...", self.friendly_name)
+                    # Stream silence while paused to keep the connection alive
+                    silence_chunk = b'\x00' * chunk_size  # Generate silence (zeros)
                     while self._paused and self._stream_active and not self._stop_called:
-                        await asyncio.sleep(0.1)
+                        yield silence_chunk
+                        await asyncio.sleep(period_s)  # Match the expected timing
                     if not self._stream_active or self._stop_called:
                         break
                     self.logger.info("Audio input stream resumed for %s, restarting arecord process", self.friendly_name)
@@ -457,7 +458,10 @@ class AudioInputProvider(PluginProvider):
 
                     try:
                         async for chunk in proc.iter_chunked(chunk_size):
-                            if not chunk or self._paused or not self._stream_active or self._stop_called:
+                            if not chunk or not self._stream_active or self._stop_called:
+                                break
+                            if self._paused:
+                                # Stream is paused, break to stop arecord but keep stream alive
                                 break
                             yield chunk
                         # If we exit the loop due to pause, break out of the attempt loop
