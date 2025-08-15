@@ -1,0 +1,9 @@
+{
+  "type": "plugin",
+  "domain": "alsa_capture",
+  "name": "ALSA Capture",
+  "description": "Exposes an ALSA input as a live audio source using a named FIFO pipe via arecord.",
+  "codeowners": ["@"],
+  "requirements": [],
+  "documentation": "https://music-assistant.io/"
+}
