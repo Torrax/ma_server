@@ -50,7 +50,7 @@ CONF_THUMBNAIL_IMAGE = "thumbnail_image"       # URL only (for now)
 CONF_PERIOD_US = "period_us"                   # ALSA period in microseconds
 CONF_BUFFER_US = "buffer_us"                   # ALSA buffer in microseconds
 
-DEFAULT_SR = 48000
+DEFAULT_SR = 44100
 DEFAULT_CHANNELS = 2
 DEFAULT_PERIOD_US = 10000    # 10 ms
 DEFAULT_BUFFER_US = 20000    # 20 ms
@@ -81,7 +81,7 @@ async def get_config_entries(
         ConfigEntry(
             key="display_section",
             type=ConfigEntryType.LABEL,
-            label="DISPLAY",
+            label="------ DISPLAY ------",
         ),
         ConfigEntry(
             key=CONF_FRIENDLY_NAME,
@@ -101,7 +101,7 @@ async def get_config_entries(
         ConfigEntry(
             key="audio_section",
             type=ConfigEntryType.LABEL,
-            label="AUDIO",
+            label="----- AUDIO -----",
         ),
         ConfigEntry(
             key=CONF_INPUT_DEVICE,
