@@ -79,6 +79,11 @@ async def get_config_entries(
     return (
         CONF_ENTRY_WARN_PREVIEW,
         ConfigEntry(
+            key="display_section",
+            type=ConfigEntryType.LABEL,
+            label="DISPLAY",
+        ),
+        ConfigEntry(
             key=CONF_FRIENDLY_NAME,
             type=ConfigEntryType.STRING,
             label="Display Name",
@@ -88,10 +93,15 @@ async def get_config_entries(
         ConfigEntry(
             key=CONF_THUMBNAIL_IMAGE,
             type=ConfigEntryType.STRING,
-            label="Thumbnail Image (URL)",
+            label="Thumbnail image",
             description="Direct URL to an SVG/PNG/JPG, e.g. https://example.com/icon.svg",
             default_value="",
             required=False,
+        ),
+        ConfigEntry(
+            key="audio_section",
+            type=ConfigEntryType.LABEL,
+            label="AUDIO",
         ),
         ConfigEntry(
             key=CONF_INPUT_DEVICE,
