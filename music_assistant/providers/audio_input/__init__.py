@@ -285,10 +285,33 @@ class AudioInputProvider(PluginProvider):
                     values={"output_codec": "wav"}
                 )
                 
-                self.logger.warning(
-                    "🎵 CODEC CHANGED: Player %s codec changed from '%s' to 'WAV' for %s", 
-                    player_id, current_codec, self.friendly_name
+                # Clear any cached config values
+                self.mass.config._value_cache.clear()
+                
+                # Give the config change time to propagate
+                await asyncio.sleep(0.5)
+                
+                # Force player update to ensure config is applied
+                self.mass.players.update(player_id, force_update=True)
+                
+                # Additional wait for player update to complete
+                await asyncio.sleep(0.2)
+                
+                # Verify the change took effect
+                new_codec = await self.mass.config.get_player_config_value(
+                    player_id, "output_codec"
                 )
+                
+                self.logger.warning(
+                    "🎵 CODEC CHANGED: Player %s codec changed from '%s' to 'WAV' for %s (verified: %s)", 
+                    player_id, current_codec, self.friendly_name, new_codec
+                )
+                
+                if new_codec != "wav":
+                    self.logger.error(
+                        "🎵 CODEC VERIFICATION FAILED: Expected 'wav' but got '%s' for player %s", 
+                        new_codec, player_id
+                    )
             else:
                 self.logger.warning(
                     "🎵 CODEC UNCHANGED: Player %s already using WAV codec for %s", 
@@ -457,6 +480,13 @@ class AudioInputProvider(PluginProvider):
 
         # Save current codec and set to WAV for optimal audio quality
         await self._save_and_set_wav_codec(player_id)
+
+        # Additional verification and debugging
+        final_codec = await self.mass.config.get_player_config_value(player_id, "output_codec")
+        self.logger.warning(
+            "🎵 FINAL CODEC CHECK: Player %s codec is now '%s' before starting stream", 
+            player_id, final_codec
+        )
 
         # Start player state monitoring
         if not self._monitor_task or self._monitor_task.done():
