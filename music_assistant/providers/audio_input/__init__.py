@@ -338,7 +338,7 @@ class AudioInputProvider(PluginProvider):
 
     async def cmd_pause(self, player_id: str) -> None:
         """Handle pause command for the audio input stream."""
-        self.logger.info("Pausing audio input stream for %s - stopping stream entirely", self.friendly_name)
+        self.logger.info("Pausing audio input stream for %s - will end stream and restart fresh on resume", self.friendly_name)
         self._paused = True
         self._stream_active = False
         
@@ -351,10 +351,10 @@ class AudioInputProvider(PluginProvider):
 
     async def cmd_play(self, player_id: str) -> None:
         """Handle play/resume command for the audio input stream."""
-        self.logger.info("Resuming audio input stream for %s - will restart fresh stream", self.friendly_name)
+        self.logger.info("Resuming audio input stream for %s - will start completely fresh stream", self.friendly_name)
         self._paused = False
         self._stream_active = True
-        # The stream will be restarted fresh when get_audio_stream is called again
+        # Music Assistant will call get_audio_stream again for a fresh stream
 
     async def cmd_stop(self, player_id: str) -> None:
         """Handle stop command for the audio input stream."""
@@ -453,13 +453,8 @@ class AudioInputProvider(PluginProvider):
             self._capture_proc = await start_arecord_process()
         
         try:
-            # Main streaming loop - only stream when not paused and stream is active
-            while self._stream_active and not self._stop_called:
-                # If paused or stream not active, exit the generator completely
-                if self._paused or not self._stream_active:
-                    self.logger.info("Stream paused or inactive for %s - terminating stream generator", self.friendly_name)
-                    break
-                
+            # Main streaming loop - terminate completely when paused
+            while self._stream_active and not self._stop_called and not self._paused:
                 # Ensure arecord is running
                 if not self._capture_proc or self._capture_proc.closed:
                     self.logger.info("Starting fresh arecord process for %s", self.friendly_name)
@@ -497,6 +492,10 @@ class AudioInputProvider(PluginProvider):
                 
                 # Small delay to prevent overwhelming
                 await asyncio.sleep(0.001)
+            
+            # If we exit the loop due to pause, log it
+            if self._paused:
+                self.logger.info("Stream generator terminating for %s due to pause - will restart fresh on resume", self.friendly_name)
 
         except Exception as err:
             self.logger.error("Error in audio stream for %s: %s", self.friendly_name, err)
