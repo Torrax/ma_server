@@ -216,14 +216,6 @@ class AudioInputProvider(PluginProvider):
         self._stream_active = False
         self._current_player_id: str | None = None
         self._monitor_task: asyncio.Task | None = None          # type: ignore[type-arg]
-        
-        # Codec management for WAV output
-        self._original_codec: str | None = None
-        self._codec_changed: bool = False
-        
-        # Chromecast app pre-launch optimization
-        self._prewarmed_chromecasts: set[str] = set()
-        self._prewarm_task: asyncio.Task | None = None
 
         # Static plugin-wide audio source definition
         metadata = PlayerMedia("Live Audio Input")
@@ -262,151 +254,8 @@ class AudioInputProvider(PluginProvider):
 
     async def handle_async_init(self) -> None:
         """Called when MA is ready."""
-        # Monkey patch the streams controller to intercept URL generation for our plugin
-        original_get_plugin_source_url = self.mass.streams.get_plugin_source_url
-        
-        async def patched_get_plugin_source_url(plugin_source: str, player_id: str) -> str:
-            # If this is our plugin, set codec to optimal format first
-            if plugin_source == self.instance_id:
-                self.logger.warning(
-                    "🎵 URL GENERATION: Setting optimal codec for %s before URL generation", 
-                    self.friendly_name
-                )
-                
-                # For Chromecast players, ensure they're pre-warmed immediately
-                player = self.mass.players.get(player_id)
-                if player and player.provider == "chromecast" and player_id not in self._prewarmed_chromecasts:
-                    self.logger.warning(
-                        "🎵 URGENT PREWARM: Chromecast %s not pre-warmed, doing immediate pre-warm", 
-                        player.display_name
-                    )
-                    await self._prewarm_chromecast_player(player_id)
-                
-                await self._save_and_set_optimal_codec(player_id)
-            
-            # Call the original method
-            return await original_get_plugin_source_url(plugin_source, player_id)
-        
-        # Replace the method
-        self.mass.streams.get_plugin_source_url = patched_get_plugin_source_url
-        self.logger.warning(
-            "🎵 MONKEY PATCH: Installed codec management for %s", 
-            self.friendly_name
-        )
-        
-        # Start Chromecast pre-warming task with immediate execution
-        self._prewarm_task = asyncio.create_task(self._prewarm_chromecasts())
-        
-        # Also do an immediate pre-warm check (don't wait for the 30s cycle)
-        asyncio.create_task(self._immediate_prewarm_check())
-
-    async def _save_and_set_optimal_codec(self, player_id: str) -> None:
-        """Save current codec and set player to optimal format for low latency."""
-        try:
-            # Get current codec setting
-            current_codec = await self.mass.config.get_player_config_value(
-                player_id, "output_codec"
-            )
-            
-            # Get player info to determine optimal codec
-            player = self.mass.players.get(player_id)
-            is_chromecast = player and player.provider == "chromecast"
-            
-            # Choose optimal codec based on player type
-            if is_chromecast:
-                # Chromecast works better with FLAC (it hardcodes content-type to audio/flac)
-                optimal_codec = "flac"
-                codec_reason = "FLAC for Chromecast compatibility"
-            else:
-                # Other players benefit from WAV for fastest processing
-                optimal_codec = "wav"
-                codec_reason = "WAV for minimal latency"
-            
-            self.logger.warning(
-                "🎵 CODEC MANAGEMENT: Player %s (%s) current codec is '%s', optimal: '%s' (%s)", 
-                player_id, player.provider if player else "unknown", current_codec, optimal_codec, codec_reason
-            )
-            
-            # Only change if not already optimal
-            if current_codec != optimal_codec:
-                self._original_codec = current_codec
-                self._codec_changed = True
-                
-                # Set codec to optimal
-                await self.mass.config.save_player_config(
-                    player_id=player_id,
-                    values={"output_codec": optimal_codec}
-                )
-                
-                # Clear any cached config values
-                self.mass.config._value_cache.clear()
-                
-                # Reduced wait time for faster startup - give the config change time to propagate
-                await asyncio.sleep(0.1)
-                
-                # Force player update to ensure config is applied
-                self.mass.players.update(player_id, force_update=True)
-                
-                # Minimal wait for player update to complete
-                await asyncio.sleep(0.05)
-                
-                # Verify the change took effect
-                new_codec = await self.mass.config.get_player_config_value(
-                    player_id, "output_codec"
-                )
-                
-                self.logger.warning(
-                    "🎵 CODEC CHANGED: Player %s codec changed from '%s' to '%s' for %s (verified: %s)", 
-                    player_id, current_codec, optimal_codec.upper(), self.friendly_name, new_codec
-                )
-                
-                if new_codec != optimal_codec:
-                    self.logger.error(
-                        "🎵 CODEC VERIFICATION FAILED: Expected '%s' but got '%s' for player %s", 
-                        optimal_codec, new_codec, player_id
-                    )
-            else:
-                self.logger.warning(
-                    "🎵 CODEC UNCHANGED: Player %s already using optimal codec '%s' for %s", 
-                    player_id, optimal_codec.upper(), self.friendly_name
-                )
-                
-        except Exception as err:
-            self.logger.error(
-                "🎵 CODEC ERROR: Failed to set optimal codec for player %s: %s", 
-                player_id, err
-            )
-
-    async def _restore_original_codec(self, player_id: str) -> None:
-        """Restore the original codec setting."""
-        if not self._codec_changed or not self._original_codec:
-            self.logger.warning(
-                "🎵 CODEC RESTORE: No codec to restore for player %s (changed=%s, original=%s)", 
-                player_id, self._codec_changed, self._original_codec
-            )
-            return
-            
-        try:
-            # Restore original codec
-            await self.mass.config.save_player_config(
-                player_id=player_id,
-                values={"output_codec": self._original_codec}
-            )
-            
-            self.logger.warning(
-                "🎵 CODEC RESTORED: Player %s codec restored from WAV back to '%s' after %s usage", 
-                player_id, self._original_codec, self.friendly_name
-            )
-            
-        except Exception as err:
-            self.logger.error(
-                "🎵 CODEC RESTORE ERROR: Failed to restore codec for player %s: %s", 
-                player_id, err
-            )
-        finally:
-            # Reset codec management state
-            self._original_codec = None
-            self._codec_changed = False
+        # No background capture for CUSTOM streams.
+        return
 
     async def _monitor_player_state(self, player_id: str) -> None:
         """Monitor player state to detect pause/play/stop commands."""
@@ -414,8 +263,6 @@ class AudioInputProvider(PluginProvider):
         
         previous_state = None
         self._current_player_id = player_id
-        startup_grace_period = 5.0  # Give players 5 seconds to start up
-        stream_start_time = asyncio.get_event_loop().time()
         
         while self._stream_active and not self._stop_called:
             try:
@@ -425,11 +272,6 @@ class AudioInputProvider(PluginProvider):
                     break
                     
                 current_state = player.state
-                current_time = asyncio.get_event_loop().time()
-                is_in_startup_grace = (current_time - stream_start_time) < startup_grace_period
-                
-                # Check if this is a Chromecast player
-                is_chromecast = player.provider == "chromecast"
                 
                 # Check if player state changed
                 if previous_state != current_state:
@@ -440,15 +282,8 @@ class AudioInputProvider(PluginProvider):
                         self.logger.info("Player %s resumed - will restart arecord process for %s", player_id, self.friendly_name)
                         self._paused = False
                     elif current_state == PlayerState.IDLE:
-                        # For Chromecast players during startup, ignore IDLE state briefly
-                        if is_chromecast and is_in_startup_grace:
-                            self.logger.debug(
-                                "Ignoring IDLE state for Chromecast player %s during startup grace period", 
-                                player_id
-                            )
-                        else:
-                            self.logger.info("Player %s stopped - will stop arecord process for %s", player_id, self.friendly_name)
-                            self._paused = True
+                        self.logger.info("Player %s stopped - will stop arecord process for %s", player_id, self.friendly_name)
+                        self._paused = True
                 
                 previous_state = current_state
                 await asyncio.sleep(0.2)  # Check every 200ms
@@ -462,10 +297,6 @@ class AudioInputProvider(PluginProvider):
         self.logger.info("Unloading audio input provider %s", self.friendly_name)
         self._stop_called = True
         self._stream_active = False
-
-        # Restore codec if we have a current player and changed codec
-        if self._current_player_id and self._codec_changed:
-            await self._restore_original_codec(self._current_player_id)
 
         # Stop the capture process first (if any active CUSTOM stream)
         if self._capture_proc and not self._capture_proc.closed:
@@ -486,13 +317,6 @@ class AudioInputProvider(PluginProvider):
             self._runner_task.cancel()
             with suppress(asyncio.CancelledError):
                 await self._runner_task
-
-        # Cancel the prewarm task
-        if self._prewarm_task and not self._prewarm_task.done():
-            self._prewarm_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._prewarm_task
-        self._prewarm_task = None
 
         # Optionally force players to refresh their source lists
         for player in self.mass.players.all():
@@ -536,9 +360,6 @@ class AudioInputProvider(PluginProvider):
         self._paused = False
         self._stream_active = False
         
-        # Restore original codec when stopping
-        await self._restore_original_codec(player_id)
-        
         # Stop the current capture process
         if self._capture_proc and not self._capture_proc.closed:
             self.logger.info("Stopping arecord process due to stop command for %s", self.friendly_name)
@@ -551,27 +372,6 @@ class AudioInputProvider(PluginProvider):
         self._stream_active = True
         self._current_player_id = player_id
         self.logger.info("Audio input stream requested for %s by player %s", self.friendly_name, player_id)
-
-        # The codec should already be set to optimal format at this point
-        # but let's verify and set it if needed as a fallback
-        current_codec = await self.mass.config.get_player_config_value(player_id, "output_codec")
-        
-        # Determine what the optimal codec should be
-        player = self.mass.players.get(player_id)
-        is_chromecast = player and player.provider == "chromecast"
-        optimal_codec = "flac" if is_chromecast else "wav"
-        
-        if current_codec != optimal_codec:
-            self.logger.warning(
-                "🎵 FALLBACK CODEC SET: Player %s codec was '%s', setting to optimal '%s'", 
-                player_id, current_codec, optimal_codec.upper()
-            )
-            await self._save_and_set_optimal_codec(player_id)
-        else:
-            self.logger.warning(
-                "🎵 CODEC VERIFIED: Player %s codec is already optimal '%s' for %s", 
-                player_id, optimal_codec.upper(), self.friendly_name
-            )
 
         # Start player state monitoring
         if not self._monitor_task or self._monitor_task.done():
@@ -646,20 +446,14 @@ class AudioInputProvider(PluginProvider):
             self.logger.error("All arecord attempts failed for %s: %s", self.friendly_name, last_err)
             return None
 
-        # Get player info for special handling
-        player = self.mass.players.get(player_id)
-        is_chromecast = player and player.provider == "chromecast"
-        
-        # For Chromecast, always start arecord regardless of pause state
-        # For other players, respect the pause state
-        if not self._paused or is_chromecast:
+        # Start initial arecord process only if not paused
+        if not self._paused:
             self._capture_proc = await start_arecord_process()
         
         try:
             # Main streaming loop - keep stream alive but control audio output
             while self._stream_active and not self._stop_called:
-                # For Chromecast players, ignore pause state and keep streaming
-                if self._paused and not is_chromecast:
+                if self._paused:
                     # Paused state - stop arecord if running and just wait without yielding
                     if self._capture_proc and not self._capture_proc.closed:
                         self.logger.info("Stopping arecord process for %s (paused)", self.friendly_name)
@@ -673,10 +467,7 @@ class AudioInputProvider(PluginProvider):
                 
                 # Playing state - ensure arecord is running
                 if not self._capture_proc or self._capture_proc.closed:
-                    if is_chromecast:
-                        self.logger.info("Starting fresh arecord process for %s (Chromecast - ignoring pause state)", self.friendly_name)
-                    else:
-                        self.logger.info("Starting fresh arecord process for %s (resumed)", self.friendly_name)
+                    self.logger.info("Starting fresh arecord process for %s (resumed)", self.friendly_name)
                     self._capture_proc = await start_arecord_process()
                     
                     if not self._capture_proc:
@@ -716,9 +507,6 @@ class AudioInputProvider(PluginProvider):
             self.logger.error("Error in audio stream for %s: %s", self.friendly_name, err)
 
         finally:
-            # Restore original codec before cleanup
-            await self._restore_original_codec(player_id)
-            
             # Clean up monitoring task
             if self._monitor_task and not self._monitor_task.done():
                 self._monitor_task.cancel()
@@ -734,105 +522,6 @@ class AudioInputProvider(PluginProvider):
                 self._capture_proc = None
 
         self.logger.info("Audio stream ended for %s", self.friendly_name)
-
-    # ---------------- Chromecast Pre-warming ----------------
-
-    async def _prewarm_chromecasts(self) -> None:
-        """Continuously monitor and pre-warm Chromecast players for faster startup."""
-        self.logger.info("🎵 PREWARM: Starting Chromecast pre-warming task for %s", self.friendly_name)
-        
-        while not self._stop_called:
-            try:
-                # Get all available Chromecast players
-                chromecast_players = [
-                    player for player in self.mass.players.all()
-                    if player.provider == "chromecast" and player.available
-                ]
-                
-                for player in chromecast_players:
-                    if player.player_id not in self._prewarmed_chromecasts:
-                        # Pre-warm this Chromecast
-                        await self._prewarm_chromecast_player(player.player_id)
-                
-                # Clean up prewarmed list for players that are no longer available
-                available_ids = {p.player_id for p in chromecast_players}
-                self._prewarmed_chromecasts &= available_ids
-                
-                # Check every 30 seconds for new Chromecast players
-                await asyncio.sleep(30)
-                
-            except Exception as err:
-                self.logger.debug("Error in Chromecast pre-warming task: %s", err)
-                await asyncio.sleep(60)  # Wait longer on error
-
-    async def _prewarm_chromecast_player(self, player_id: str) -> None:
-        """Pre-warm a specific Chromecast player by launching the app."""
-        try:
-            player = self.mass.players.get(player_id)
-            if not player or player.provider != "chromecast":
-                return
-                
-            self.logger.info("🎵 PREWARM: Pre-warming Chromecast %s (%s) for %s", 
-                           player.display_name, player_id, self.friendly_name)
-            
-            # Get the Chromecast provider to access the _launch_app method
-            chromecast_provider = self.mass.get_provider("chromecast")
-            if not chromecast_provider:
-                self.logger.warning("🎵 PREWARM: Chromecast provider not found")
-                return
-                
-            # Get the cast player object
-            if not hasattr(chromecast_provider, 'castplayers'):
-                self.logger.warning("🎵 PREWARM: Chromecast provider has no castplayers")
-                return
-                
-            castplayer = chromecast_provider.castplayers.get(player_id)
-            if not castplayer:
-                self.logger.warning("🎵 PREWARM: Cast player %s not found in provider", player_id)
-                return
-            
-            # Check if the app is already running
-            if castplayer.cc.app_id and castplayer.cc.app_id != "E8C28D3C":  # E8C28D3C is IDLE_APP_ID
-                self.logger.debug("🎵 PREWARM: Chromecast %s already has app running (%s)", 
-                                player.display_name, castplayer.cc.app_id)
-                self._prewarmed_chromecasts.add(player_id)
-                return
-            
-            # Launch the app to pre-warm the device
-            await chromecast_provider._launch_app(castplayer)
-            
-            self._prewarmed_chromecasts.add(player_id)
-            self.logger.info("🎵 PREWARM: Successfully pre-warmed Chromecast %s for %s", 
-                           player.display_name, self.friendly_name)
-            
-        except Exception as err:
-            self.logger.warning("🎵 PREWARM: Failed to pre-warm Chromecast %s: %s", player_id, err)
-
-    async def _immediate_prewarm_check(self) -> None:
-        """Immediately check for and pre-warm any available Chromecast players."""
-        # Wait a short time for players to be discovered
-        await asyncio.sleep(2)
-        
-        try:
-            self.logger.info("🎵 PREWARM: Running immediate pre-warm check for %s", self.friendly_name)
-            
-            # Get all available Chromecast players
-            chromecast_players = [
-                player for player in self.mass.players.all()
-                if player.provider == "chromecast" and player.available
-            ]
-            
-            if not chromecast_players:
-                self.logger.debug("🎵 PREWARM: No Chromecast players found for immediate pre-warming")
-                return
-            
-            # Pre-warm all available Chromecast players immediately
-            for player in chromecast_players:
-                if player.player_id not in self._prewarmed_chromecasts:
-                    await self._prewarm_chromecast_player(player.player_id)
-                    
-        except Exception as err:
-            self.logger.debug("Error in immediate pre-warm check: %s", err)
 
     # ---------------- Internals ----------------
 
