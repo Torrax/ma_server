@@ -272,6 +272,16 @@ class AudioInputProvider(PluginProvider):
                     "🎵 URL GENERATION: Setting optimal codec for %s before URL generation", 
                     self.friendly_name
                 )
+                
+                # For Chromecast players, ensure they're pre-warmed immediately
+                player = self.mass.players.get(player_id)
+                if player and player.provider == "chromecast" and player_id not in self._prewarmed_chromecasts:
+                    self.logger.warning(
+                        "🎵 URGENT PREWARM: Chromecast %s not pre-warmed, doing immediate pre-warm", 
+                        player.display_name
+                    )
+                    await self._prewarm_chromecast_player(player_id)
+                
                 await self._save_and_set_optimal_codec(player_id)
             
             # Call the original method
@@ -284,8 +294,11 @@ class AudioInputProvider(PluginProvider):
             self.friendly_name
         )
         
-        # Start Chromecast pre-warming task
+        # Start Chromecast pre-warming task with immediate execution
         self._prewarm_task = asyncio.create_task(self._prewarm_chromecasts())
+        
+        # Also do an immediate pre-warm check (don't wait for the 30s cycle)
+        asyncio.create_task(self._immediate_prewarm_check())
 
     async def _save_and_set_optimal_codec(self, player_id: str) -> None:
         """Save current codec and set player to optimal format for low latency."""
@@ -794,6 +807,32 @@ class AudioInputProvider(PluginProvider):
             
         except Exception as err:
             self.logger.warning("🎵 PREWARM: Failed to pre-warm Chromecast %s: %s", player_id, err)
+
+    async def _immediate_prewarm_check(self) -> None:
+        """Immediately check for and pre-warm any available Chromecast players."""
+        # Wait a short time for players to be discovered
+        await asyncio.sleep(2)
+        
+        try:
+            self.logger.info("🎵 PREWARM: Running immediate pre-warm check for %s", self.friendly_name)
+            
+            # Get all available Chromecast players
+            chromecast_players = [
+                player for player in self.mass.players.all()
+                if player.provider == "chromecast" and player.available
+            ]
+            
+            if not chromecast_players:
+                self.logger.debug("🎵 PREWARM: No Chromecast players found for immediate pre-warming")
+                return
+            
+            # Pre-warm all available Chromecast players immediately
+            for player in chromecast_players:
+                if player.player_id not in self._prewarmed_chromecasts:
+                    await self._prewarm_chromecast_player(player.player_id)
+                    
+        except Exception as err:
+            self.logger.debug("Error in immediate pre-warm check: %s", err)
 
     # ---------------- Internals ----------------
 
