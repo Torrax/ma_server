@@ -5,7 +5,7 @@ Live-Audio-Input plugin for Music Assistant
 Captures raw PCM from a user-selected ALSA/Pulse (via ALSA) input and forwards it
 to a Music Assistant player through an ultra-low-latency CUSTOM stream.
 
-Author: @Torrax
+Author: (@Torrax)
 """
 
 from __future__ import annotations
@@ -22,10 +22,11 @@ from music_assistant_models.config_entries import (
 )
 from music_assistant_models.enums import (
     ContentType,
+    ImageType,
     ProviderFeature,
     StreamType,
 )
-from music_assistant_models.media_items import AudioFormat
+from music_assistant_models.media_items import AudioFormat, MediaItemImage
 from music_assistant_models.player import PlayerMedia
 
 from music_assistant.constants import CONF_ENTRY_WARN_PREVIEW
@@ -76,6 +77,15 @@ async def get_config_entries(
     """Config wizard for the plugin."""
     device_options = await _get_available_input_devices()
 
+    # Available local images
+    local_image_options = [
+        ConfigValueOption("None (use default)", ""),
+        ConfigValueOption("Bluetooth", "images/bluetooth.svg"),
+        ConfigValueOption("Cable/Line-in", "images/cable.svg"),
+        ConfigValueOption("Music", "images/music.svg"),
+        ConfigValueOption("Stereo", "images/stereo.svg"),
+    ]
+
     return (
         CONF_ENTRY_WARN_PREVIEW,
         ConfigEntry(
@@ -91,9 +101,30 @@ async def get_config_entries(
             required=True,
         ),
         ConfigEntry(
+            key="thumbnail_image_type",
+            type=ConfigEntryType.STRING,
+            label="Thumbnail Image Type",
+            description="Choose between local images or custom URL",
+            options=[
+                ConfigValueOption("Local Image", "local"),
+                ConfigValueOption("Custom URL", "url"),
+            ],
+            default_value="local",
+            required=True,
+        ),
+        ConfigEntry(
+            key="thumbnail_local_image",
+            type=ConfigEntryType.STRING,
+            label="Local Thumbnail Image",
+            description="Select from available local images",
+            options=local_image_options,
+            default_value="images/music.svg",
+            required=False,
+        ),
+        ConfigEntry(
             key=CONF_THUMBNAIL_IMAGE,
             type=ConfigEntryType.STRING,
-            label="Thumbnail image",
+            label="Custom Thumbnail URL",
             description="Direct URL to an SVG/PNG/JPG, e.g. https://example.com/icon.svg",
             default_value="",
             required=False,
@@ -203,7 +234,11 @@ class AudioInputProvider(PluginProvider):
         self.period_us: int = cast(int, self.config.get_value(CONF_PERIOD_US))
         self.buffer_us: int = cast(int, self.config.get_value(CONF_BUFFER_US))
         self.friendly_name: str = cast(str, self.config.get_value(CONF_FRIENDLY_NAME))
-        self.thumbnail_image: str = cast(str, self.config.get_value(CONF_THUMBNAIL_IMAGE) or "")
+        
+        # Get image configuration
+        self.thumbnail_image_type: str = cast(str, self.config.get_value("thumbnail_image_type") or "local")
+        self.thumbnail_local_image: str = cast(str, self.config.get_value("thumbnail_local_image") or "")
+        self.thumbnail_custom_url: str = cast(str, self.config.get_value(CONF_THUMBNAIL_IMAGE) or "")
 
         # Parse device string for ALSA (arecord)
         self.alsa_device = self._parse_device_string(self.device)
@@ -223,12 +258,48 @@ class AudioInputProvider(PluginProvider):
 
         # Static plugin-wide audio source definition
         metadata = PlayerMedia("Live Audio Input")
-        if self.thumbnail_image and self.thumbnail_image.startswith(("http://", "https://")):
-            metadata.image_url = self.thumbnail_image
-        elif self.thumbnail_image:
-            self.logger.warning(
-                "Only URLs are supported for thumbnail images. Ignoring: %s",
-                self.thumbnail_image,
+        
+        # Handle image configuration
+        self.logger.info(
+            "🖼️ IMAGE CONFIG: type=%s, local=%s, url=%s for %s",
+            self.thumbnail_image_type,
+            self.thumbnail_local_image,
+            self.thumbnail_custom_url,
+            self.friendly_name,
+        )
+        
+        if self.thumbnail_image_type == "url" and self.thumbnail_custom_url:
+            # Use custom URL
+            if self.thumbnail_custom_url.startswith(("http://", "https://")):
+                metadata.image_url = self.thumbnail_custom_url
+                self.logger.info(
+                    "🖼️ USING CUSTOM URL: %s for %s",
+                    self.thumbnail_custom_url,
+                    self.friendly_name,
+                )
+            else:
+                self.logger.warning(
+                    "🖼️ INVALID URL: Custom thumbnail URL must start with http:// or https://. Ignoring: %s",
+                    self.thumbnail_custom_url,
+                )
+        elif self.thumbnail_image_type == "local" and self.thumbnail_local_image:
+            # Use local image through MA's image system
+            metadata.image = MediaItemImage(
+                type=ImageType.THUMB,
+                path=self.thumbnail_local_image,
+                provider=self.instance_id,
+                remotely_accessible=False,
+            )
+            self.logger.info(
+                "🖼️ USING LOCAL IMAGE: %s for %s (provider=%s)",
+                self.thumbnail_local_image,
+                self.friendly_name,
+                self.instance_id,
+            )
+        else:
+            self.logger.info(
+                "🖼️ NO IMAGE: No valid image configuration for %s",
+                self.friendly_name,
             )
 
         self._source_details = PluginSource(
@@ -255,6 +326,69 @@ class AudioInputProvider(PluginProvider):
     @property
     def supported_features(self) -> set[ProviderFeature]:
         return {ProviderFeature.AUDIO_SOURCE}
+
+    async def resolve_image(self, path: str) -> str | bytes | None:
+        """Resolve local image path to full file path for the image proxy."""
+        self.logger.info(
+            "🖼️ RESOLVE_IMAGE: Attempting to resolve image path: %s for provider %s",
+            path,
+            self.instance_id,
+        )
+        
+        if not path or not path.startswith("images/"):
+            self.logger.warning(
+                "🖼️ RESOLVE_IMAGE: Invalid path format: %s (must start with 'images/')",
+                path,
+            )
+            return None
+        
+        # Convert relative path to absolute path within the provider directory
+        import os
+        provider_dir = os.path.dirname(__file__)
+        full_path = os.path.join(provider_dir, path)
+        
+        self.logger.info(
+            "🖼️ RESOLVE_IMAGE: Provider dir: %s, Full path: %s",
+            provider_dir,
+            full_path,
+        )
+        
+        # Check if file exists
+        if os.path.isfile(full_path):
+            self.logger.info(
+                "🖼️ RESOLVE_IMAGE: Successfully resolved local image: %s -> %s",
+                path,
+                full_path,
+            )
+            return full_path
+        
+        self.logger.error(
+            "🖼️ RESOLVE_IMAGE: Local image not found: %s (looked for: %s)",
+            path,
+            full_path,
+        )
+        
+        # List available files for debugging
+        try:
+            images_dir = os.path.join(provider_dir, "images")
+            if os.path.isdir(images_dir):
+                available_files = os.listdir(images_dir)
+                self.logger.info(
+                    "🖼️ RESOLVE_IMAGE: Available files in images directory: %s",
+                    available_files,
+                )
+            else:
+                self.logger.error(
+                    "🖼️ RESOLVE_IMAGE: Images directory does not exist: %s",
+                    images_dir,
+                )
+        except Exception as err:
+            self.logger.error(
+                "🖼️ RESOLVE_IMAGE: Error listing images directory: %s",
+                err,
+            )
+        
+        return None
 
     async def handle_async_init(self) -> None:
         """Called when MA is ready."""
@@ -701,4 +835,3 @@ class AudioInputProvider(PluginProvider):
             return "default"
         # Assume it's already a valid ALSA device name
         return device
-
