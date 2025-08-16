@@ -262,13 +262,13 @@ class AudioInputProvider(PluginProvider):
         original_get_plugin_source_url = self.mass.streams.get_plugin_source_url
         
         async def patched_get_plugin_source_url(plugin_source: str, player_id: str) -> str:
-            # If this is our plugin, set codec to optimal format first
+            # If this is our plugin, set codec to WAV first
             if plugin_source == self.instance_id:
                 self.logger.warning(
-                    "🎵 URL GENERATION: Setting optimal codec for %s before URL generation", 
+                    "🎵 URL GENERATION: Setting codec to WAV for %s before URL generation", 
                     self.friendly_name
                 )
-                await self._save_and_set_optimal_codec(player_id)
+                await self._save_and_set_wav_codec(player_id)
             
             # Call the original method
             return await original_get_plugin_source_url(plugin_source, player_id)
@@ -280,42 +280,28 @@ class AudioInputProvider(PluginProvider):
             self.friendly_name
         )
 
-    async def _save_and_set_optimal_codec(self, player_id: str) -> None:
-        """Save current codec and set player to optimal format for low latency."""
+    async def _save_and_set_wav_codec(self, player_id: str) -> None:
+        """Save current codec and set player to WAV format."""
         try:
             # Get current codec setting
             current_codec = await self.mass.config.get_player_config_value(
                 player_id, "output_codec"
             )
             
-            # Get player info to determine optimal codec
-            player = self.mass.players.get(player_id)
-            is_chromecast = player and player.provider == "chromecast"
-            
-            # Choose optimal codec based on player type
-            if is_chromecast:
-                # Chromecast works better with FLAC (it hardcodes content-type to audio/flac)
-                optimal_codec = "flac"
-                codec_reason = "FLAC for Chromecast compatibility"
-            else:
-                # Other players benefit from WAV for fastest processing
-                optimal_codec = "wav"
-                codec_reason = "WAV for minimal latency"
-            
             self.logger.warning(
-                "🎵 CODEC MANAGEMENT: Player %s (%s) current codec is '%s', optimal: '%s' (%s)", 
-                player_id, player.provider if player else "unknown", current_codec, optimal_codec, codec_reason
+                "🎵 CODEC MANAGEMENT: Player %s current codec is '%s'", 
+                player_id, current_codec
             )
             
-            # Only change if not already optimal
-            if current_codec != optimal_codec:
+            # Only change if not already WAV
+            if current_codec != "wav":
                 self._original_codec = current_codec
                 self._codec_changed = True
                 
-                # Set codec to optimal
+                # Set codec to WAV
                 await self.mass.config.save_player_config(
                     player_id=player_id,
-                    values={"output_codec": optimal_codec}
+                    values={"output_codec": "wav"}
                 )
                 
                 # Clear any cached config values
@@ -336,24 +322,24 @@ class AudioInputProvider(PluginProvider):
                 )
                 
                 self.logger.warning(
-                    "🎵 CODEC CHANGED: Player %s codec changed from '%s' to '%s' for %s (verified: %s)", 
-                    player_id, current_codec, optimal_codec.upper(), self.friendly_name, new_codec
+                    "🎵 CODEC CHANGED: Player %s codec changed from '%s' to 'WAV' for %s (verified: %s)", 
+                    player_id, current_codec, self.friendly_name, new_codec
                 )
                 
-                if new_codec != optimal_codec:
+                if new_codec != "wav":
                     self.logger.error(
-                        "🎵 CODEC VERIFICATION FAILED: Expected '%s' but got '%s' for player %s", 
-                        optimal_codec, new_codec, player_id
+                        "🎵 CODEC VERIFICATION FAILED: Expected 'wav' but got '%s' for player %s", 
+                        new_codec, player_id
                     )
             else:
                 self.logger.warning(
-                    "🎵 CODEC UNCHANGED: Player %s already using optimal codec '%s' for %s", 
-                    player_id, optimal_codec.upper(), self.friendly_name
+                    "🎵 CODEC UNCHANGED: Player %s already using WAV codec for %s", 
+                    player_id, self.friendly_name
                 )
                 
         except Exception as err:
             self.logger.error(
-                "🎵 CODEC ERROR: Failed to set optimal codec for player %s: %s", 
+                "🎵 CODEC ERROR: Failed to set WAV codec for player %s: %s", 
                 player_id, err
             )
 
@@ -525,25 +511,19 @@ class AudioInputProvider(PluginProvider):
         self._current_player_id = player_id
         self.logger.info("Audio input stream requested for %s by player %s", self.friendly_name, player_id)
 
-        # The codec should already be set to optimal format at this point
+        # The codec should already be set to WAV at this point
         # but let's verify and set it if needed as a fallback
         current_codec = await self.mass.config.get_player_config_value(player_id, "output_codec")
-        
-        # Determine what the optimal codec should be
-        player = self.mass.players.get(player_id)
-        is_chromecast = player and player.provider == "chromecast"
-        optimal_codec = "flac" if is_chromecast else "wav"
-        
-        if current_codec != optimal_codec:
+        if current_codec != "wav":
             self.logger.warning(
-                "🎵 FALLBACK CODEC SET: Player %s codec was '%s', setting to optimal '%s'", 
-                player_id, current_codec, optimal_codec.upper()
+                "🎵 FALLBACK CODEC SET: Player %s codec was '%s', setting to WAV", 
+                player_id, current_codec
             )
-            await self._save_and_set_optimal_codec(player_id)
+            await self._save_and_set_wav_codec(player_id)
         else:
             self.logger.warning(
-                "🎵 CODEC VERIFIED: Player %s codec is already optimal '%s' for %s", 
-                player_id, optimal_codec.upper(), self.friendly_name
+                "🎵 CODEC VERIFIED: Player %s codec is already 'wav' for %s", 
+                player_id, self.friendly_name
             )
 
         # Start player state monitoring
