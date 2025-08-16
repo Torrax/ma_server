@@ -57,7 +57,6 @@ from music_assistant.constants import (
 from music_assistant.helpers.audio import (
     CACHE_FILES_IN_USE,
     crossfade_pcm_parts,
-    create_wave_header,
     get_chunksize,
     get_media_stream,
     get_player_filter_params,
@@ -732,42 +731,7 @@ class StreamsController(CoreController):
         if request.method != "GET":
             return resp
 
-        # ---- WAV/PCM fast-path: bypass ffmpeg if format matches exactly ----
-        same_format = (
-            output_format.sample_rate == plugin_source.audio_format.sample_rate
-            and output_format.bit_depth == plugin_source.audio_format.bit_depth
-            and output_format.channels == plugin_source.audio_format.channels
-        )
-        wav_fast_path = output_format.content_type == ContentType.WAV and same_format
-
-        if wav_fast_path:
-            # Write an indefinite-length WAV header, then stream raw PCM directly.
-            wav_header = create_wave_header(
-                samplerate=output_format.sample_rate,
-                channels=output_format.channels,
-                bitspersample=output_format.bit_depth,
-                duration=None,
-            )
-            try:
-                await resp.write(wav_header)
-            except (BrokenPipeError, ConnectionResetError, ConnectionError):
-                return resp
-
-            audio_input = provider.get_audio_stream(player_id)
-            player.active_source = plugin_source_id
-            plugin_source.in_use_by = player_id
-            try:
-                async for chunk in audio_input:
-                    try:
-                        await resp.write(chunk)
-                    except (BrokenPipeError, ConnectionResetError, ConnectionError):
-                        break
-            finally:
-                player.active_source = player.player_id
-                plugin_source.in_use_by = None
-            return resp
-
-        # ---- Low-latency ffmpeg path (non-WAV or format mismatch) ----
+        # all checks passed, start streaming!
         async for chunk in self.get_plugin_source_stream(
             plugin_source_id=plugin_source_id,
             output_format=output_format,
@@ -775,8 +739,6 @@ class StreamsController(CoreController):
             player_filter_params=get_player_filter_params(
                 self.mass, player_id, plugin_source.audio_format, output_format
             ),
-            chunk_size=int(max(8192, get_chunksize(output_format) // 10)),
-            low_latency=True,
         ):
             try:
                 await resp.write(chunk)
@@ -1011,8 +973,6 @@ class StreamsController(CoreController):
         output_format: AudioFormat,
         player_id: str,
         player_filter_params: list[str] | None = None,
-        chunk_size: int | None = None,
-        low_latency: bool = False,
     ) -> AsyncGenerator[bytes, None]:
         """Get the special plugin source stream."""
         player = self.mass.players.get(player_id)
@@ -1020,7 +980,7 @@ class StreamsController(CoreController):
         plugin_source = plugin_prov.get_source()
         if plugin_source.in_use_by and plugin_source.in_use_by != player_id:
             raise RuntimeError(
-                f"PluginSource {plugin_source.name} is already in use by {plugin_source.in_use_by}"
+                f"PluginSource plugin_source.name is already in use by {plugin_source.in_use_by}"
             )
         self.logger.debug("Start streaming PluginSource %s to %s", plugin_source_id, player_id)
         audio_input = (
@@ -1036,18 +996,15 @@ class StreamsController(CoreController):
                 input_format=plugin_source.audio_format,
                 output_format=output_format,
                 filter_params=player_filter_params,
-                extra_args=(
-                    ["-fflags", "nobuffer", "-flags", "low_delay", "-flush_packets", "1"]
-                    if low_latency
-                    else []
-                ),
-                chunk_size=chunk_size or int(max(8192, get_chunksize(output_format) // 10)),
+                extra_input_args=["-re"],
+                chunk_size=int(get_chunksize(output_format) / 10),
             ):
                 yield chunk
         finally:
             self.logger.debug(
                 "Finished streaming PluginSource %s to %s", plugin_source_id, player_id
             )
+            await asyncio.sleep(0.5)
             player.active_source = player.player_id
             plugin_source.in_use_by = None
 
