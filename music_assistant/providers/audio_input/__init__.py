@@ -450,6 +450,9 @@ class AudioInputProvider(PluginProvider):
         if not self._paused:
             self._capture_proc = await start_arecord_process()
         
+        # Track if we just resumed from pause to discard initial buffered audio
+        just_resumed = False
+        
         try:
             # Main streaming loop - keep stream alive but control audio output
             while self._stream_active and not self._stop_called:
@@ -460,6 +463,9 @@ class AudioInputProvider(PluginProvider):
                         with suppress(Exception):
                             await self._capture_proc.close(True)
                         self._capture_proc = None
+                    
+                    # Set flag to discard initial audio when we resume
+                    just_resumed = True
                     
                     # Just wait during pause - don't yield anything, keep stream alive
                     await asyncio.sleep(period_s)
@@ -474,6 +480,9 @@ class AudioInputProvider(PluginProvider):
                         # Failed to start arecord, wait and retry
                         await asyncio.sleep(period_s)
                         continue
+                    
+                    # Set flag to discard initial buffered audio from new process
+                    just_resumed = True
                 
                 # Read from arecord process
                 try:
@@ -483,7 +492,26 @@ class AudioInputProvider(PluginProvider):
                     )
                     
                     if chunk:
-                        yield chunk
+                        if just_resumed:
+                            # Discard the first few chunks after resume to clear any buffered audio
+                            # This prevents the ~1 second of old audio from playing
+                            self.logger.debug("Discarding initial buffered audio chunk for %s (post-resume)", self.friendly_name)
+                            just_resumed = False
+                            # Read and discard a few more chunks to clear the buffer
+                            for _ in range(3):  # Discard ~3 chunks to clear buffer
+                                try:
+                                    discard_chunk = await asyncio.wait_for(
+                                        self._capture_proc.read(chunk_size), 
+                                        timeout=period_s
+                                    )
+                                    if not discard_chunk:
+                                        break
+                                    self.logger.debug("Discarded buffered chunk for %s", self.friendly_name)
+                                except asyncio.TimeoutError:
+                                    break
+                            continue  # Skip yielding this chunk and the discarded ones
+                        else:
+                            yield chunk
                     else:
                         # arecord ended, mark for restart
                         self.logger.warning("arecord process ended for %s, will restart on next iteration", self.friendly_name)
