@@ -15,7 +15,6 @@ import urllib.parse
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
-from aiohttp.http import HttpVersion10
 
 from aiofiles.os import wrap
 from aiohttp import web
@@ -58,7 +57,6 @@ from music_assistant.constants import (
 from music_assistant.helpers.audio import (
     CACHE_FILES_IN_USE,
     crossfade_pcm_parts,
-    create_wave_header,
     get_chunksize,
     get_media_stream,
     get_player_filter_params,
@@ -687,17 +685,17 @@ class StreamsController(CoreController):
         return resp
 
     async def serve_plugin_source_stream(self, request: web.Request) -> web.Response:
+        """Stream PluginSource audio to a player."""
         self._log_request(request)
         plugin_source_id = request.match_info["plugin_source"]
-        provider: PluginProvider | None = self.mass.get_provider(plugin_source_id)
-        if not provider:
+        provider: PluginProvider | None
+        if not (provider := self.mass.get_provider(plugin_source_id)):
             raise web.HTTPNotFound(reason=f"Unknown PluginSource: {plugin_source_id}")
-    
+        # work out output format/details
         player_id = request.match_info["player_id"]
         player = self.mass.players.get(player_id)
         if not player:
             raise web.HTTPNotFound(reason=f"Unknown Player: {player_id}")
-    
         plugin_source = provider.get_source()
         output_format = await self.get_output_format(
             output_format_str=request.match_info["fmt"],
@@ -705,77 +703,35 @@ class StreamsController(CoreController):
             content_sample_rate=plugin_source.audio_format.sample_rate,
             content_bit_depth=plugin_source.audio_format.bit_depth,
         )
-    
-        # (optional) ICY handling (not used for WAV fast-path)
-        icy_pref = self.mass.config.get_raw_player_config_value(
-            player_id, CONF_ENTRY_ENABLE_ICY_METADATA.key, CONF_ENTRY_ENABLE_ICY_METADATA.default_value
-        )
-        enable_icy = request.headers.get("Icy-MetaData", "") == "1" and icy_pref != "disabled"
-        icy_meta_interval = 256000 if icy_pref == "full" else 16384
-    
         headers = {
             **DEFAULT_STREAM_HEADERS,
             "icy-name": plugin_source.name,
             "Accept-Ranges": "none",
             "Content-Type": f"audio/{output_format.output_format_str}",
         }
-        # Only attach ICY headers when we're not doing WAV fast-path
-        same_format = (
-            output_format.sample_rate == plugin_source.audio_format.sample_rate
-            and output_format.bit_depth == plugin_source.audio_format.bit_depth
-            and output_format.channels == plugin_source.audio_format.channels
+
+        resp = web.StreamResponse(
+            status=200,
+            reason="OK",
+            headers=headers,
         )
-        wav_fast_path = output_format.content_type == ContentType.WAV and same_format
-        if enable_icy and not wav_fast_path:
-            headers.update(ICY_HEADERS)
-            headers["icy-metaint"] = str(icy_meta_interval)
-    
-        resp = web.StreamResponse(status=200, reason="OK", headers=headers)
         resp.content_type = f"audio/{output_format.output_format_str}"
-    
-        # HTTP/1.0 must not use chunked
-        is_http10 = request.version <= HttpVersion10
-        if not is_http10:
-            # We *can* enable chunked for 1.1, but it's optional here.
-            # resp.enable_chunked_encoding()
-            pass
-    
+        http_profile: str = await self.mass.config.get_player_config_value(
+            player_id, CONF_HTTP_PROFILE
+        )
+        if http_profile == "forced_content_length":
+            # guess content length based on duration
+            resp.content_length = get_chunksize(output_format, 12 * 3600)
+        elif http_profile == "chunked":
+            resp.enable_chunked_encoding()
+
         await resp.prepare(request)
+
+        # return early if this is not a GET request
         if request.method != "GET":
             return resp
 
-        # WAV/PCM fast-path: bypass ffmpeg, write WAV header + raw PCM chunks directly.
-        if wav_fast_path:
-            # Write a huge/unspecified-length WAV header so the client starts immediately
-            wav_header = create_wave_header(
-                samplerate=output_format.sample_rate,
-                channels=output_format.channels,
-                bitspersample=output_format.bit_depth,
-                duration=None,  # big data chunk
-            )
-            try:
-                await resp.write(wav_header)
-            except (BrokenPipeError, ConnectionResetError, ConnectionError):
-                return resp
-
-            # Stream raw PCM from the plugin provider
-            audio_input = provider.get_audio_stream(player_id)
-            plugin_source.in_use_by = player_id
-            player.active_source = plugin_source_id
-            try:
-                async for chunk in audio_input:
-                    try:
-                        await resp.write(chunk)
-                    except (BrokenPipeError, ConnectionResetError, ConnectionError):
-                        break
-            finally:
-                player.active_source = player.player_id
-                plugin_source.in_use_by = None
-            return resp
-    
-        # Low-latency streaming via ffmpeg (non-PCM or format mismatch)
-        chunk_size = icy_meta_interval if (enable_icy and not wav_fast_path) else int(max(8192, get_chunksize(output_format) // 20))
-    
+        # all checks passed, start streaming!
         async for chunk in self.get_plugin_source_stream(
             plugin_source_id=plugin_source_id,
             output_format=output_format,
@@ -783,27 +739,13 @@ class StreamsController(CoreController):
             player_filter_params=get_player_filter_params(
                 self.mass, player_id, plugin_source.audio_format, output_format
             ),
-            chunk_size=chunk_size,
-            low_latency=True,
         ):
             try:
                 await resp.write(chunk)
             except (BrokenPipeError, ConnectionResetError, ConnectionError):
                 break
-    
-            if enable_icy and not wav_fast_path:
-                title = plugin_source.name or "Music Assistant"
-                metadata = f"StreamTitle='{title}';".encode()
-                while len(metadata) % 16 != 0:
-                    metadata += b"\x00"
-                length_b = bytes([len(metadata) // 16])
-                try:
-                    await resp.write(length_b + metadata)
-                except (BrokenPipeError, ConnectionResetError, ConnectionError):
-                    break
-    
         return resp
-    
+
     def get_command_url(self, player_or_queue_id: str, command: str) -> str:
         """Get the url for the special command stream."""
         return f"{self.base_url}/command/{player_or_queue_id}/{command}.mp3"
@@ -1031,8 +973,6 @@ class StreamsController(CoreController):
         output_format: AudioFormat,
         player_id: str,
         player_filter_params: list[str] | None = None,
-        chunk_size: int | None = None,
-        low_latency: bool = False,
     ) -> AsyncGenerator[bytes, None]:
         """Get the special plugin source stream."""
         player = self.mass.players.get(player_id)
@@ -1040,10 +980,9 @@ class StreamsController(CoreController):
         plugin_source = plugin_prov.get_source()
         if plugin_source.in_use_by and plugin_source.in_use_by != player_id:
             raise RuntimeError(
-                f"PluginSource {plugin_source.name} is already in use by {plugin_source.in_use_by}"
+                f"PluginSource plugin_source.name is already in use by {plugin_source.in_use_by}"
             )
         self.logger.debug("Start streaming PluginSource %s to %s", plugin_source_id, player_id)
-    
         audio_input = (
             plugin_prov.get_audio_stream(player_id)
             if plugin_source.stream_type == StreamType.CUSTOM
@@ -1051,24 +990,24 @@ class StreamsController(CoreController):
         )
         player.active_source = plugin_source_id
         plugin_source.in_use_by = player_id
-    
-        # Low-latency ffmpeg flags (safe when input is our PCM pipe)
-        extra_args = ["-fflags", "nobuffer", "-flags", "low_delay", "-flush_packets", "1"] if low_latency else []
         try:
             async for chunk in get_ffmpeg_stream(
                 audio_input=audio_input,
                 input_format=plugin_source.audio_format,
                 output_format=output_format,
                 filter_params=player_filter_params,
-                extra_args=extra_args,
-                chunk_size=chunk_size or int(max(8192, get_chunksize(output_format) // 10)),
+                //extra_input_args=["-re"],
+                chunk_size=int(get_chunksize(output_format) / 10),
             ):
                 yield chunk
         finally:
-            # no await asyncio.sleep(0.5) here
+            self.logger.debug(
+                "Finished streaming PluginSource %s to %s", plugin_source_id, player_id
+            )
+            await asyncio.sleep(0.5)
             player.active_source = player.player_id
             plugin_source.in_use_by = None
-            
+
     async def get_queue_item_stream(
         self,
         queue_item: QueueItem,
@@ -1091,7 +1030,7 @@ class StreamsController(CoreController):
             filter_params.append(filter_rule)
         elif streamdetails.volume_normalization_mode == VolumeNormalizationMode.FIXED_GAIN:
             # apply used defined fixed volume/gain correction
-            gain_correct = await self.mass.config.get_core_config_value(
+            gain_correct: float = await self.mass.config.get_core_config_value(
                 self.domain,
                 CONF_VOLUME_NORMALIZATION_FIXED_GAIN_TRACKS
                 if streamdetails.media_type == MediaType.TRACK
@@ -1110,8 +1049,14 @@ class StreamsController(CoreController):
             filter_params.append(f"volume={gain_correct}dB")
         streamdetails.volume_normalization_gain_correct = gain_correct
 
-        # NOTE: intentionally removed the fixed 4-second pre-roll silence
-        # for radio/live/unknown-duration items to reduce startup latency.
+        if streamdetails.media_type == MediaType.RADIO or not streamdetails.duration:
+            # pad some silence before the radio/live stream starts to create some headroom
+            # for radio stations (or other live streams) that do not provide any look ahead buffer
+            # without this, some radio streams jitter a lot, especially with dynamic normalization,
+            # if the stream does not provide a look ahead buffer
+            async for silence in get_silence(4, pcm_format):
+                yield silence
+                del silence
 
         first_chunk_received = False
         async for chunk in get_media_stream(
