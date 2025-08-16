@@ -996,7 +996,7 @@ class StreamsController(CoreController):
                 input_format=plugin_source.audio_format,
                 output_format=output_format,
                 filter_params=player_filter_params,
-##                extra_input_args=["-re"],
+                extra_args=["-re"],
                 chunk_size=int(get_chunksize(output_format) / 10),
             ):
                 yield chunk
@@ -1049,14 +1049,7 @@ class StreamsController(CoreController):
             filter_params.append(f"volume={gain_correct}dB")
         streamdetails.volume_normalization_gain_correct = gain_correct
 
-        if streamdetails.media_type == MediaType.RADIO or not streamdetails.duration:
-            # pad some silence before the radio/live stream starts to create some headroom
-            # for radio stations (or other live streams) that do not provide any look ahead buffer
-            # without this, some radio streams jitter a lot, especially with dynamic normalization,
-            # if the stream does not provide a look ahead buffer
-            async for silence in get_silence(4, pcm_format):
-                yield silence
-                del silence
+        # (Change D) Removed fixed 4-second preroll on radio/unknown-duration items.
 
         first_chunk_received = False
         async for chunk in get_media_stream(
