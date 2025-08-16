@@ -303,6 +303,15 @@ class ChromecastProvider(PlayerProvider):
             # check if the next queue item isn't already queued
             if item.get("media", {}).get("customData", {}).get("uri") == media.uri:
                 return
+        # Check if this is a plugin source for optimized preload settings
+        is_plugin_source = (
+            hasattr(media, 'custom_data') and 
+            media.custom_data and 
+            (media.custom_data.get('source_id') or 
+             media.custom_data.get('is_live_source') or
+             media.custom_data.get('source_type') == 'audio_input')
+        )
+        
         queuedata = {
             "type": "QUEUE_INSERT",
             "insertBefore": next_item_id,
@@ -310,7 +319,7 @@ class ChromecastProvider(PlayerProvider):
                 {
                     "autoplay": True,
                     "startTime": 0,
-                    "preloadTime": 0,
+                    "preloadTime": 0 if is_plugin_source else 0,  # Minimal preload for live sources
                     "media": self._create_cc_media_item(media),
                 }
             ],
@@ -654,10 +663,20 @@ class ChromecastProvider(PlayerProvider):
 
     def _create_cc_media_item(self, media: PlayerMedia) -> dict[str, Any]:
         """Create CC media item from MA PlayerMedia."""
-        if media.media_type == MediaType.TRACK:
+        # Check if this is a plugin source (like audio input) that should use live streaming
+        is_plugin_source = (
+            hasattr(media, 'custom_data') and 
+            media.custom_data and 
+            (media.custom_data.get('source_id') or 
+             media.custom_data.get('is_live_source') or
+             media.custom_data.get('source_type') == 'audio_input')
+        )
+        
+        if media.media_type == MediaType.TRACK and not is_plugin_source:
             stream_type = STREAM_TYPE_BUFFERED
         else:
             stream_type = STREAM_TYPE_LIVE
+            
         metadata = {
             "metadataType": 3,
             "albumName": media.album or "",
@@ -666,13 +685,20 @@ class ChromecastProvider(PlayerProvider):
             "title": media.title or "",
             "images": [{"url": media.image_url}] if media.image_url else None,
         }
+        
+        # For live sources, set minimal preload time to reduce buffering
+        custom_data = {
+            "uri": media.uri,
+            "queue_item_id": media.uri,
+            "deviceName": "Music Assistant",
+        }
+        if is_plugin_source:
+            custom_data["isLiveSource"] = True
+            custom_data["lowLatency"] = True
+            
         return {
             "contentId": media.uri,
-            "customData": {
-                "uri": media.uri,
-                "queue_item_id": media.uri,
-                "deviceName": "Music Assistant",
-            },
+            "customData": custom_data,
             "contentType": "audio/flac",
             "streamType": stream_type,
             "metadata": metadata,
