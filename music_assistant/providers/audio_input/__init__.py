@@ -338,9 +338,8 @@ class AudioInputProvider(PluginProvider):
 
     async def cmd_pause(self, player_id: str) -> None:
         """Handle pause command for the audio input stream."""
-        self.logger.info("Pausing audio input stream for %s - will end stream and restart fresh on resume", self.friendly_name)
+        self.logger.info("Pausing audio input stream for %s - stopping arecord but keeping stream alive", self.friendly_name)
         self._paused = True
-        self._stream_active = False
         
         # Stop the current capture process
         if self._capture_proc and not self._capture_proc.closed:
@@ -351,10 +350,9 @@ class AudioInputProvider(PluginProvider):
 
     async def cmd_play(self, player_id: str) -> None:
         """Handle play/resume command for the audio input stream."""
-        self.logger.info("Resuming audio input stream for %s - will start completely fresh stream", self.friendly_name)
+        self.logger.info("Resuming audio input stream for %s - will restart fresh arecord", self.friendly_name)
         self._paused = False
-        self._stream_active = True
-        # Music Assistant will call get_audio_stream again for a fresh stream
+        # The arecord process will be restarted fresh in the stream loop
 
     async def cmd_stop(self, player_id: str) -> None:
         """Handle stop command for the audio input stream."""
@@ -453,17 +451,29 @@ class AudioInputProvider(PluginProvider):
             self._capture_proc = await start_arecord_process()
         
         try:
-            # Main streaming loop - terminate completely when paused
-            while self._stream_active and not self._stop_called and not self._paused:
-                # Ensure arecord is running
+            # Main streaming loop - keep stream alive but control audio output
+            while self._stream_active and not self._stop_called:
+                if self._paused:
+                    # Paused state - stop arecord if running and just wait without yielding
+                    if self._capture_proc and not self._capture_proc.closed:
+                        self.logger.info("Stopping arecord process for %s (paused)", self.friendly_name)
+                        with suppress(Exception):
+                            await self._capture_proc.close(True)
+                        self._capture_proc = None
+                    
+                    # Just wait during pause - don't yield anything, keep stream alive
+                    await asyncio.sleep(period_s)
+                    continue
+                
+                # Playing state - ensure arecord is running
                 if not self._capture_proc or self._capture_proc.closed:
-                    self.logger.info("Starting fresh arecord process for %s", self.friendly_name)
+                    self.logger.info("Starting fresh arecord process for %s (resumed)", self.friendly_name)
                     self._capture_proc = await start_arecord_process()
                     
                     if not self._capture_proc:
-                        # Failed to start arecord, exit stream
-                        self.logger.error("Failed to start arecord for %s - terminating stream", self.friendly_name)
-                        break
+                        # Failed to start arecord, wait and retry
+                        await asyncio.sleep(period_s)
+                        continue
                 
                 # Read from arecord process
                 try:
@@ -492,10 +502,6 @@ class AudioInputProvider(PluginProvider):
                 
                 # Small delay to prevent overwhelming
                 await asyncio.sleep(0.001)
-            
-            # If we exit the loop due to pause, log it
-            if self._paused:
-                self.logger.info("Stream generator terminating for %s due to pause - will restart fresh on resume", self.friendly_name)
 
         except Exception as err:
             self.logger.error("Error in audio stream for %s: %s", self.friendly_name, err)
