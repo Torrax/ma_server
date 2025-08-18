@@ -216,6 +216,10 @@ class AudioInputProvider(PluginProvider):
         self._stream_active = False
         self._current_player_id: str | None = None
         self._monitor_task: asyncio.Task | None = None          # type: ignore[type-arg]
+        
+        # Codec management for WAV output
+        self._original_codec: str | None = None
+        self._codec_changed: bool = False
 
         # Static plugin-wide audio source definition
         metadata = PlayerMedia("Live Audio Input")
@@ -254,8 +258,121 @@ class AudioInputProvider(PluginProvider):
 
     async def handle_async_init(self) -> None:
         """Called when MA is ready."""
-        # No background capture for CUSTOM streams.
-        return
+        # Monkey patch the streams controller to intercept URL generation for our plugin
+        original_get_plugin_source_url = self.mass.streams.get_plugin_source_url
+        
+        async def patched_get_plugin_source_url(plugin_source: str, player_id: str) -> str:
+            # If this is our plugin, set codec to WAV first
+            if plugin_source == self.instance_id:
+                self.logger.warning(
+                    "🎵 URL GENERATION: Setting codec to WAV for %s before URL generation", 
+                    self.friendly_name
+                )
+                await self._save_and_set_wav_codec(player_id)
+            
+            # Call the original method
+            return await original_get_plugin_source_url(plugin_source, player_id)
+        
+        # Replace the method
+        self.mass.streams.get_plugin_source_url = patched_get_plugin_source_url
+        self.logger.warning(
+            "🎵 MONKEY PATCH: Installed codec management for %s", 
+            self.friendly_name
+        )
+
+    async def _save_and_set_wav_codec(self, player_id: str) -> None:
+        """Save current codec and set player to WAV format."""
+        try:
+            # Get current codec setting
+            current_codec = await self.mass.config.get_player_config_value(
+                player_id, "output_codec"
+            )
+            
+            self.logger.warning(
+                "🎵 CODEC MANAGEMENT: Player %s current codec is '%s'", 
+                player_id, current_codec
+            )
+            
+            # Only change if not already WAV
+            if current_codec != "wav":
+                self._original_codec = current_codec
+                self._codec_changed = True
+                
+                # Set codec to WAV
+                await self.mass.config.save_player_config(
+                    player_id=player_id,
+                    values={"output_codec": "wav"}
+                )
+                
+                # Clear any cached config values
+                self.mass.config._value_cache.clear()
+                
+                # Give the config change time to propagate
+                await asyncio.sleep(0.5)
+                
+                # Force player update to ensure config is applied
+                self.mass.players.update(player_id, force_update=True)
+                
+                # Additional wait for player update to complete
+                await asyncio.sleep(0.2)
+                
+                # Verify the change took effect
+                new_codec = await self.mass.config.get_player_config_value(
+                    player_id, "output_codec"
+                )
+                
+                self.logger.warning(
+                    "🎵 CODEC CHANGED: Player %s codec changed from '%s' to 'WAV' for %s (verified: %s)", 
+                    player_id, current_codec, self.friendly_name, new_codec
+                )
+                
+                if new_codec != "wav":
+                    self.logger.error(
+                        "🎵 CODEC VERIFICATION FAILED: Expected 'wav' but got '%s' for player %s", 
+                        new_codec, player_id
+                    )
+            else:
+                self.logger.warning(
+                    "🎵 CODEC UNCHANGED: Player %s already using WAV codec for %s", 
+                    player_id, self.friendly_name
+                )
+                
+        except Exception as err:
+            self.logger.error(
+                "🎵 CODEC ERROR: Failed to set WAV codec for player %s: %s", 
+                player_id, err
+            )
+
+    async def _restore_original_codec(self, player_id: str) -> None:
+        """Restore the original codec setting."""
+        if not self._codec_changed or not self._original_codec:
+            self.logger.warning(
+                "🎵 CODEC RESTORE: No codec to restore for player %s (changed=%s, original=%s)", 
+                player_id, self._codec_changed, self._original_codec
+            )
+            return
+            
+        try:
+            # Restore original codec
+            await self.mass.config.save_player_config(
+                player_id=player_id,
+                values={"output_codec": self._original_codec}
+            )
+            
+            self.logger.warning(
+                "🎵 CODEC RESTORED: Player %s codec restored from WAV back to '%s' after %s usage", 
+                player_id, self._original_codec, self.friendly_name
+            )
+            
+        except Exception as err:
+            self.logger.error(
+                "🎵 CODEC RESTORE ERROR: Failed to restore codec for player %s: %s", 
+                player_id, err
+            )
+        finally:
+            # Reset codec management state
+            self._original_codec = None
+            self._codec_changed = False
 
     async def _monitor_player_state(self, player_id: str) -> None:
         """Monitor player state to detect pause/play/stop commands."""
@@ -263,6 +380,8 @@ class AudioInputProvider(PluginProvider):
         
         previous_state = None
         self._current_player_id = player_id
+        startup_grace_period = 5.0  # Give players 5 seconds to start up
+        stream_start_time = asyncio.get_event_loop().time()
         
         while self._stream_active and not self._stop_called:
             try:
@@ -272,6 +391,11 @@ class AudioInputProvider(PluginProvider):
                     break
                     
                 current_state = player.state
+                current_time = asyncio.get_event_loop().time()
+                is_in_startup_grace = (current_time - stream_start_time) < startup_grace_period
+                
+                # Check if this is a Chromecast player
+                is_chromecast = player.provider == "chromecast"
                 
                 # Check if player state changed
                 if previous_state != current_state:
@@ -282,8 +406,15 @@ class AudioInputProvider(PluginProvider):
                         self.logger.info("Player %s resumed - will restart arecord process for %s", player_id, self.friendly_name)
                         self._paused = False
                     elif current_state == PlayerState.IDLE:
-                        self.logger.info("Player %s stopped - will stop arecord process for %s", player_id, self.friendly_name)
-                        self._paused = True
+                        # For Chromecast players during startup, ignore IDLE state briefly
+                        if is_chromecast and is_in_startup_grace:
+                            self.logger.debug(
+                                "Ignoring IDLE state for Chromecast player %s during startup grace period", 
+                                player_id
+                            )
+                        else:
+                            self.logger.info("Player %s stopped - will stop arecord process for %s", player_id, self.friendly_name)
+                            self._paused = True
                 
                 previous_state = current_state
                 await asyncio.sleep(0.2)  # Check every 200ms
@@ -297,6 +428,10 @@ class AudioInputProvider(PluginProvider):
         self.logger.info("Unloading audio input provider %s", self.friendly_name)
         self._stop_called = True
         self._stream_active = False
+
+        # Restore codec if we have a current player and changed codec
+        if self._current_player_id and self._codec_changed:
+            await self._restore_original_codec(self._current_player_id)
 
         # Stop the capture process first (if any active CUSTOM stream)
         if self._capture_proc and not self._capture_proc.closed:
@@ -360,6 +495,9 @@ class AudioInputProvider(PluginProvider):
         self._paused = False
         self._stream_active = False
         
+        # Restore original codec when stopping
+        await self._restore_original_codec(player_id)
+        
         # Stop the current capture process
         if self._capture_proc and not self._capture_proc.closed:
             self.logger.info("Stopping arecord process due to stop command for %s", self.friendly_name)
@@ -372,6 +510,21 @@ class AudioInputProvider(PluginProvider):
         self._stream_active = True
         self._current_player_id = player_id
         self.logger.info("Audio input stream requested for %s by player %s", self.friendly_name, player_id)
+
+        # The codec should already be set to WAV at this point
+        # but let's verify and set it if needed as a fallback
+        current_codec = await self.mass.config.get_player_config_value(player_id, "output_codec")
+        if current_codec != "wav":
+            self.logger.warning(
+                "🎵 FALLBACK CODEC SET: Player %s codec was '%s', setting to WAV", 
+                player_id, current_codec
+            )
+            await self._save_and_set_wav_codec(player_id)
+        else:
+            self.logger.warning(
+                "🎵 CODEC VERIFIED: Player %s codec is already 'wav' for %s", 
+                player_id, self.friendly_name
+            )
 
         # Start player state monitoring
         if not self._monitor_task or self._monitor_task.done():
@@ -446,14 +599,20 @@ class AudioInputProvider(PluginProvider):
             self.logger.error("All arecord attempts failed for %s: %s", self.friendly_name, last_err)
             return None
 
-        # Start initial arecord process only if not paused
-        if not self._paused:
+        # Get player info for special handling
+        player = self.mass.players.get(player_id)
+        is_chromecast = player and player.provider == "chromecast"
+        
+        # For Chromecast, always start arecord regardless of pause state
+        # For other players, respect the pause state
+        if not self._paused or is_chromecast:
             self._capture_proc = await start_arecord_process()
         
         try:
             # Main streaming loop - keep stream alive but control audio output
             while self._stream_active and not self._stop_called:
-                if self._paused:
+                # For Chromecast players, ignore pause state and keep streaming
+                if self._paused and not is_chromecast:
                     # Paused state - stop arecord if running and just wait without yielding
                     if self._capture_proc and not self._capture_proc.closed:
                         self.logger.info("Stopping arecord process for %s (paused)", self.friendly_name)
@@ -467,7 +626,10 @@ class AudioInputProvider(PluginProvider):
                 
                 # Playing state - ensure arecord is running
                 if not self._capture_proc or self._capture_proc.closed:
-                    self.logger.info("Starting fresh arecord process for %s (resumed)", self.friendly_name)
+                    if is_chromecast:
+                        self.logger.info("Starting fresh arecord process for %s (Chromecast - ignoring pause state)", self.friendly_name)
+                    else:
+                        self.logger.info("Starting fresh arecord process for %s (resumed)", self.friendly_name)
                     self._capture_proc = await start_arecord_process()
                     
                     if not self._capture_proc:
@@ -507,6 +669,9 @@ class AudioInputProvider(PluginProvider):
             self.logger.error("Error in audio stream for %s: %s", self.friendly_name, err)
 
         finally:
+            # Restore original codec before cleanup
+            await self._restore_original_codec(player_id)
+            
             # Clean up monitoring task
             if self._monitor_task and not self._monitor_task.done():
                 self._monitor_task.cancel()
