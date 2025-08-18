@@ -5,14 +5,14 @@ Live-Audio-Input plugin for Music Assistant
 Captures raw PCM from a user-selected ALSA/Pulse (via ALSA) input and forwards it
 to a Music Assistant player through an ultra-low-latency CUSTOM stream.
 
-Author: you (@Torrax)
+Author: (@Torrax)
 """
 
 from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
-from typing import TYPE_CHECKING, Callable, cast
+from typing import TYPE_CHECKING, cast
 from collections.abc import AsyncGenerator
 
 from music_assistant_models.config_entries import (
@@ -50,7 +50,7 @@ CONF_THUMBNAIL_IMAGE = "thumbnail_image"       # URL only (for now)
 CONF_PERIOD_US = "period_us"                   # ALSA period in microseconds
 CONF_BUFFER_US = "buffer_us"                   # ALSA buffer in microseconds
 
-DEFAULT_SR = 48000
+DEFAULT_SR = 44100
 DEFAULT_CHANNELS = 2
 DEFAULT_PERIOD_US = 10000    # 10 ms
 DEFAULT_BUFFER_US = 20000    # 20 ms
@@ -79,6 +79,11 @@ async def get_config_entries(
     return (
         CONF_ENTRY_WARN_PREVIEW,
         ConfigEntry(
+            key="display_section",
+            type=ConfigEntryType.LABEL,
+            label="------------ DISPLAY ------------",
+        ),
+        ConfigEntry(
             key=CONF_FRIENDLY_NAME,
             type=ConfigEntryType.STRING,
             label="Display Name",
@@ -88,10 +93,15 @@ async def get_config_entries(
         ConfigEntry(
             key=CONF_THUMBNAIL_IMAGE,
             type=ConfigEntryType.STRING,
-            label="Thumbnail Image (URL)",
+            label="Thumbnail image",
             description="Direct URL to an SVG/PNG/JPG, e.g. https://example.com/icon.svg",
             default_value="",
             required=False,
+        ),
+        ConfigEntry(
+            key="audio_section",
+            type=ConfigEntryType.LABEL,
+            label="------------- AUDIO -------------",
         ),
         ConfigEntry(
             key=CONF_INPUT_DEVICE,
@@ -202,6 +212,10 @@ class AudioInputProvider(PluginProvider):
         self._capture_proc: AsyncProcess | None = None
         self._runner_task: asyncio.Task | None = None          # type: ignore[type-arg]
         self._stop_called = False
+        self._paused = False
+        self._stream_active = False
+        self._current_player_id: str | None = None
+        self._monitor_task: asyncio.Task | None = None          # type: ignore[type-arg]
 
         # Static plugin-wide audio source definition
         metadata = PlayerMedia("Live Audio Input")
@@ -217,7 +231,7 @@ class AudioInputProvider(PluginProvider):
             id=self.instance_id,
             name=self.friendly_name,
             passive=False,                       # user-selectable source
-            can_play_pause=False,
+            can_play_pause=True,
             can_seek=False,
             can_next_previous=False,
             audio_format=AudioFormat(
@@ -243,10 +257,46 @@ class AudioInputProvider(PluginProvider):
         # No background capture for CUSTOM streams.
         return
 
+    async def _monitor_player_state(self, player_id: str) -> None:
+        """Monitor player state to detect pause/play/stop commands."""
+        from music_assistant_models.enums import PlayerState
+        
+        previous_state = None
+        self._current_player_id = player_id
+        
+        while self._stream_active and not self._stop_called:
+            try:
+                # Get the current player state
+                player = self.mass.players.get(player_id)
+                if not player:
+                    break
+                    
+                current_state = player.state
+                
+                # Check if player state changed
+                if previous_state != current_state:
+                    if current_state == PlayerState.PAUSED and not self._paused:
+                        self.logger.info("Player %s paused - will stop arecord process for %s", player_id, self.friendly_name)
+                        self._paused = True
+                    elif current_state == PlayerState.PLAYING and self._paused:
+                        self.logger.info("Player %s resumed - will restart arecord process for %s", player_id, self.friendly_name)
+                        self._paused = False
+                    elif current_state == PlayerState.IDLE:
+                        self.logger.info("Player %s stopped - will stop arecord process for %s", player_id, self.friendly_name)
+                        self._paused = True
+                
+                previous_state = current_state
+                await asyncio.sleep(0.2)  # Check every 200ms
+                
+            except Exception as err:
+                self.logger.debug("Error monitoring player state: %s", err)
+                await asyncio.sleep(1)  # Wait longer on error
+
     async def unload(self, is_removed: bool = False) -> None:
         """Tear down."""
         self.logger.info("Unloading audio input provider %s", self.friendly_name)
         self._stop_called = True
+        self._stream_active = False
 
         # Stop the capture process first (if any active CUSTOM stream)
         if self._capture_proc and not self._capture_proc.closed:
@@ -254,6 +304,13 @@ class AudioInputProvider(PluginProvider):
             with suppress(Exception):
                 await self._capture_proc.close(True)
             self._capture_proc = None
+
+        # Cancel the monitor task
+        if self._monitor_task and not self._monitor_task.done():
+            self._monitor_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._monitor_task
+        self._monitor_task = None
 
         # Cancel the runner task (defensive)
         if self._runner_task and not self._runner_task.done():
@@ -279,8 +336,46 @@ class AudioInputProvider(PluginProvider):
         """Expose this input as a PlayerSource (CUSTOM stream)."""
         return self._source_details
 
+    async def cmd_pause(self, player_id: str) -> None:
+        """Handle pause command for the audio input stream."""
+        self.logger.info("Pausing audio input stream for %s - stopping arecord but keeping stream alive", self.friendly_name)
+        self._paused = True
+        
+        # Stop the current capture process
+        if self._capture_proc and not self._capture_proc.closed:
+            self.logger.info("Stopping arecord process due to pause for %s", self.friendly_name)
+            with suppress(Exception):
+                await self._capture_proc.close(True)
+            self._capture_proc = None
+
+    async def cmd_play(self, player_id: str) -> None:
+        """Handle play/resume command for the audio input stream."""
+        self.logger.info("Resuming audio input stream for %s - will restart fresh arecord", self.friendly_name)
+        self._paused = False
+        # The arecord process will be restarted fresh in the stream loop
+
+    async def cmd_stop(self, player_id: str) -> None:
+        """Handle stop command for the audio input stream."""
+        self.logger.info("Stopping audio input stream for %s", self.friendly_name)
+        self._paused = False
+        self._stream_active = False
+        
+        # Stop the current capture process
+        if self._capture_proc and not self._capture_proc.closed:
+            self.logger.info("Stopping arecord process due to stop command for %s", self.friendly_name)
+            with suppress(Exception):
+                await self._capture_proc.close(True)
+            self._capture_proc = None
+
     async def get_audio_stream(self, player_id: str) -> AsyncGenerator[bytes, None]:
         """Yield raw PCM from arecord directly to MA (low-latency CUSTOM stream)."""
+        self._stream_active = True
+        self._current_player_id = player_id
+        self.logger.info("Audio input stream requested for %s by player %s", self.friendly_name, player_id)
+
+        # Start player state monitoring
+        if not self._monitor_task or self._monitor_task.done():
+            self._monitor_task = asyncio.create_task(self._monitor_player_state(player_id))
 
         # Align chunk size to the requested ALSA period
         bytes_per_sec = self.sample_rate * self.channels * 2  # 16-bit PCM
@@ -326,50 +421,107 @@ class AudioInputProvider(PluginProvider):
                 "-"
             ])
 
-        last_err: Exception | None = None
+        async def start_arecord_process() -> AsyncProcess | None:
+            """Start arecord process with fallback attempts."""
+            last_err: Exception | None = None
+            
+            for idx, cmd in enumerate(attempt_cmds, start=1):
+                F_val = cmd[cmd.index("-F")+1]
+                B_val = cmd[cmd.index("-B")+1]
+                self.logger.info(
+                    "Starting CUSTOM live-capture for %s (device=%s, sr=%d, ch=%d, period=%sµs, buffer=%sµs, chunk=%dB) [attempt %d/%d]",
+                    self.friendly_name, self.alsa_device, self.sample_rate, self.channels,
+                    F_val, B_val, chunk_size, idx, len(attempt_cmds)
+                )
 
-        for idx, cmd in enumerate(attempt_cmds, start=1):
-            F_val = cmd[cmd.index("-F")+1]
-            B_val = cmd[cmd.index("-B")+1]
-            self.logger.info(
-                "Starting CUSTOM live-capture for %s (device=%s, sr=%d, ch=%d, period=%sµs, buffer=%sµs, chunk=%dB) [attempt %d/%d]",
-                self.friendly_name, self.alsa_device, self.sample_rate, self.channels,
-                F_val, B_val, chunk_size, idx, len(attempt_cmds)
-            )
-
-            proc = AsyncProcess(cmd, stdout=True, stderr=True, name=f"audio-capture[{self.friendly_name}]")
-            try:
-                await proc.start()
-                self._capture_proc = proc
-            except Exception as err:
-                last_err = err
-                self.logger.warning("arecord failed to start (attempt %d): %s", idx, err)
-                continue
-
-            try:
-                async for chunk in proc.iter_chunked(chunk_size):
-                    if not chunk:
-                        break
-                    yield chunk
-                # Normal EOF? break to finally: section
-                break
-            except Exception as err:
-                last_err = err
-                self.logger.warning("Error while reading arecord stream (attempt %d): %s", idx, err)
-                # Ensure process is closed before trying next fallback
-                with suppress(Exception):
-                    await proc.close(True)
-                self._capture_proc = None
-                # Try next fallback
-                continue
-            finally:
-                with suppress(Exception):
-                    await proc.close(True)
-                self._capture_proc = None
-
-        if last_err:
+                proc = AsyncProcess(cmd, stdout=True, stderr=True, name=f"audio-capture[{self.friendly_name}]")
+                try:
+                    await proc.start()
+                    return proc
+                except Exception as err:
+                    last_err = err
+                    self.logger.warning("arecord failed to start (attempt %d): %s", idx, err)
+                    continue
+            
             self.logger.error("All arecord attempts failed for %s: %s", self.friendly_name, last_err)
-        return
+            return None
+
+        # Start initial arecord process only if not paused
+        if not self._paused:
+            self._capture_proc = await start_arecord_process()
+        
+        try:
+            # Main streaming loop - keep stream alive but control audio output
+            while self._stream_active and not self._stop_called:
+                if self._paused:
+                    # Paused state - stop arecord if running and just wait without yielding
+                    if self._capture_proc and not self._capture_proc.closed:
+                        self.logger.info("Stopping arecord process for %s (paused)", self.friendly_name)
+                        with suppress(Exception):
+                            await self._capture_proc.close(True)
+                        self._capture_proc = None
+                    
+                    # Just wait during pause - don't yield anything, keep stream alive
+                    await asyncio.sleep(period_s)
+                    continue
+                
+                # Playing state - ensure arecord is running
+                if not self._capture_proc or self._capture_proc.closed:
+                    self.logger.info("Starting fresh arecord process for %s (resumed)", self.friendly_name)
+                    self._capture_proc = await start_arecord_process()
+                    
+                    if not self._capture_proc:
+                        # Failed to start arecord, wait and retry
+                        await asyncio.sleep(period_s)
+                        continue
+                
+                # Read from arecord process
+                try:
+                    chunk = await asyncio.wait_for(
+                        self._capture_proc.read(chunk_size), 
+                        timeout=period_s * 2
+                    )
+                    
+                    if chunk:
+                        yield chunk
+                    else:
+                        # arecord ended, mark for restart
+                        self.logger.warning("arecord process ended for %s, will restart on next iteration", self.friendly_name)
+                        self._capture_proc = None
+                        
+                except asyncio.TimeoutError:
+                    # No data available, continue loop
+                    continue
+                except Exception as err:
+                    self.logger.warning("Error reading from arecord for %s: %s", self.friendly_name, err)
+                    # Mark process for restart
+                    if self._capture_proc:
+                        with suppress(Exception):
+                            await self._capture_proc.close(True)
+                        self._capture_proc = None
+                
+                # Small delay to prevent overwhelming
+                await asyncio.sleep(0.001)
+
+        except Exception as err:
+            self.logger.error("Error in audio stream for %s: %s", self.friendly_name, err)
+
+        finally:
+            # Clean up monitoring task
+            if self._monitor_task and not self._monitor_task.done():
+                self._monitor_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await self._monitor_task
+            self._monitor_task = None
+            
+            # Clean up capture process
+            if self._capture_proc and not self._capture_proc.closed:
+                self.logger.info("Stopping arecord process for %s (stream ended)", self.friendly_name)
+                with suppress(Exception):
+                    await self._capture_proc.close(True)
+                self._capture_proc = None
+
+        self.logger.info("Audio stream ended for %s", self.friendly_name)
 
     # ---------------- Internals ----------------
 
