@@ -87,6 +87,10 @@ class UGPStream:
     ) -> AsyncGenerator[bytes, None]:
         """Subscribe to the client specific audio stream."""
         # start the runner as soon as the (first) client connects
+        if not filter_params and output_format == self.base_pcm_format:
+            async for chunk in self.subscribe_raw():
+                yield chunk
+            return
         async for chunk in get_ffmpeg_stream(
             audio_input=self.subscribe_raw(),
             input_format=self.base_pcm_format,
@@ -98,17 +102,30 @@ class UGPStream:
     async def _runner(self) -> None:
         """Run the stream for the given audio source."""
         await asyncio.sleep(0.25)  # small delay to allow subscribers to connect
-        async for chunk in get_ffmpeg_stream(
-            audio_input=self.audio_source,
-            input_format=self.input_format,
-            output_format=self.base_pcm_format,
-            # we don't allow the player to buffer too much ahead so we use readrate limiting
-            extra_input_args=["-readrate", "1.1", "-readrate_initial_burst", "10"],
-        ):
-            await asyncio.gather(
-                *[sub(chunk) for sub in self.subscribers],
-                return_exceptions=True,
-            )
+        same_params = (
+            self.input_format.sample_rate == self.base_pcm_format.sample_rate
+            and self.input_format.bit_depth == self.base_pcm_format.bit_depth
+            and self.input_format.channels == self.base_pcm_format.channels
+            and self.input_format.content_type == self.base_pcm_format.content_type
+        )
+        if same_params:
+            async for chunk in self.audio_source:
+                await asyncio.gather(
+                    *[sub(chunk) for sub in self.subscribers],
+                    return_exceptions=True,
+                )
+        else:
+            async for chunk in get_ffmpeg_stream(
+                audio_input=self.audio_source,
+                input_format=self.input_format,
+                output_format=self.base_pcm_format,
+                # we don't allow the player to buffer too much ahead so we use readrate limiting
+                extra_input_args=["-readrate", "1.1", "-readrate_initial_burst", "10"],
+            ):
+                await asyncio.gather(
+                    *[sub(chunk) for sub in self.subscribers],
+                    return_exceptions=True,
+                )
         # empty chunk when done
         await asyncio.gather(*[sub(b"") for sub in self.subscribers], return_exceptions=True)
         self._done.set()

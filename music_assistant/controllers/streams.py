@@ -1029,6 +1029,36 @@ class StreamsController(CoreController):
             if plugin_source.stream_type == StreamType.CUSTOM
             else plugin_source.path
         )
+
+        # If the plugin already delivers the desired PCM format and no
+        # additional filtering is requested, bypass ffmpeg and yield the
+        # chunks directly. This allows ultra low latency streaming of custom
+        # sources such as microphone input or other realtime streams.
+        same_params = (
+            output_format.sample_rate == plugin_source.audio_format.sample_rate
+            and output_format.bit_depth == plugin_source.audio_format.bit_depth
+            and output_format.channels == plugin_source.audio_format.channels
+            and output_format.content_type == plugin_source.audio_format.content_type
+        )
+        if (
+            plugin_source.stream_type == StreamType.CUSTOM
+            and same_params
+            and not player_filter_params
+        ):
+            player.active_source = plugin_source_id
+            plugin_source.in_use_by = player_id
+            try:
+                async for chunk in audio_input:
+                    yield chunk
+            finally:
+                self.logger.debug(
+                    "Finished streaming PluginSource %s to %s", plugin_source_id, player_id
+                )
+                await asyncio.sleep(0.5)
+                player.active_source = player.player_id
+                plugin_source.in_use_by = None
+            return
+
         player.active_source = plugin_source_id
         plugin_source.in_use_by = player_id
         try:

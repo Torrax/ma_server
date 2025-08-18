@@ -454,7 +454,20 @@ class PlayerGroupProvider(PlayerProvider):
         self.ugp_streams[player_id] = UGPStream(
             audio_source=audio_source, audio_format=UGP_FORMAT, base_pcm_format=UGP_FORMAT
         )
-        base_url = f"{self.mass.streams.base_url}/ugp/{player_id}.flac"
+        # use WAV for the group stream when all members support it to avoid
+        # unnecessary FLAC re-encoding
+        use_wav = True
+        for member in self.mass.players.iter_group_members(
+            group_player, only_powered=True, active_only=True
+        ):
+            codec = await self.mass.config.get_player_config_value(
+                member.player_id, CONF_OUTPUT_CODEC
+            )
+            if codec != "wav":
+                use_wav = False
+                break
+        ext = "wav" if use_wav else "flac"
+        base_url = f"{self.mass.streams.base_url}/ugp/{player_id}.{ext}"
 
         # set the state optimistically
         group_player.current_media = media
@@ -906,6 +919,8 @@ class PlayerGroupProvider(PlayerProvider):
             )
         elif output_format_str == "flac":
             output_format = AudioFormat(content_type=ContentType.FLAC)
+        elif output_format_str == "wav":
+            output_format = AudioFormat(content_type=ContentType.WAV)
         else:
             output_format = AudioFormat(content_type=ContentType.MP3)
 
