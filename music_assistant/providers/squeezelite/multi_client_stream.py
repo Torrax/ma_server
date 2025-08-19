@@ -51,18 +51,18 @@ class MultiClientStream:
         filter_params: list[str] | None = None,
     ) -> AsyncGenerator[bytes, None]:
         """Get (client specific encoded) ffmpeg stream."""
-        # WAV fast-path: bypass ffmpeg when output = WAV and formats match
+        # WAV fast-path: bypass ffmpeg when output = WAV and formats match and no filters
         same_format = (
-            output_format.sample_rate == self.audio_format.sample_rate
-            and output_format.bit_depth == self.audio_format.bit_depth
-            and output_format.channels == self.audio_format.channels
+            (output_format.sample_rate or 0) == (self.audio_format.sample_rate or 0)
+            and (output_format.bit_depth or 0) == (self.audio_format.bit_depth or 0)
+            and (output_format.channels or 0) == (self.audio_format.channels or 0)
         )
         if (
             output_format.content_type == ContentType.WAV
             and same_format
             and not filter_params
         ):
-            # write a big/unspecified-length WAV header then raw PCM chunks
+            # write an unspecified-length WAV header then raw PCM chunks
             wav_header = create_wave_header(
                 samplerate=output_format.sample_rate,
                 channels=output_format.channels,
@@ -76,7 +76,7 @@ class MultiClientStream:
                 yield chunk
             return
 
-        # default ffmpeg path for format conversion
+        # default ffmpeg path for format conversion / filtering
         async for chunk in get_ffmpeg_stream(
             audio_input=self.subscribe_raw(),
             input_format=self.audio_format,
@@ -102,18 +102,17 @@ class MultiClientStream:
     async def _runner(self) -> None:
         """Run the stream for the given audio source."""
         expected_clients = self.expected_clients or 1
-        # Reduce wait time for faster startup - wait max 1 second instead of 5
+        # wait for first/all subscriber
         count = 0
-        while count < 10:  # 10 * 0.1 = 1 second max wait
+        while count < 50:
             await asyncio.sleep(0.1)
             count += 1
             if len(self.subscribers) >= expected_clients:
                 break
         LOGGER.debug(
-            "Starting multi-client stream with %s/%s clients (waited %s ms)",
+            "Starting multi-client stream with %s/%s clients",
             len(self.subscribers),
             self.expected_clients,
-            count * 100,
         )
         async for chunk in self.audio_source:
             fail_count = 0
