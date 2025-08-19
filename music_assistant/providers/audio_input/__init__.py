@@ -221,6 +221,9 @@ class AudioInputProvider(PluginProvider):
         self._original_codec: str | None = None
         self._codec_changed: bool = False
 
+        # NEW: task to proactively restore codec *after* stream is running
+        self._proactive_restore_task: asyncio.Task | None = None  # type: ignore[type-arg]
+
         # Static plugin-wide audio source definition
         metadata = PlayerMedia("Live Audio Input")
         if self.thumbnail_image and self.thumbnail_image.startswith(("http://", "https://")):
@@ -374,6 +377,23 @@ class AudioInputProvider(PluginProvider):
             self._original_codec = None
             self._codec_changed = False
 
+    async def _restore_original_codec_later(self, player_id: str, delay: float = 30.0) -> None:
+        """Restore original codec after a delay *once the stream is running*."""
+        try:
+            await asyncio.sleep(delay)
+            # Only restore if stream still active and we haven't restored yet
+            if self._stream_active and self._codec_changed:
+                self.logger.info(
+                    "🎵 PROACTIVE RESTORE: Restoring codec for player %s while stream is running (delay %.1fs)",
+                    player_id, delay
+                )
+                await self._restore_original_codec(player_id)
+        except asyncio.CancelledError:
+            # Task cancelled (stop/unload/finally)
+            return
+        except Exception as err:
+            self.logger.error("🎵 PROACTIVE RESTORE ERROR: %s", err)
+
     async def _monitor_player_state(self, player_id: str) -> None:
         """Monitor player state to detect pause/play/stop commands."""
         from music_assistant_models.enums import PlayerState
@@ -428,6 +448,13 @@ class AudioInputProvider(PluginProvider):
         self.logger.info("Unloading audio input provider %s", self.friendly_name)
         self._stop_called = True
         self._stream_active = False
+
+        # Cancel proactive restore task if running
+        if self._proactive_restore_task and not self._proactive_restore_task.done():
+            self._proactive_restore_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._proactive_restore_task
+        self._proactive_restore_task = None
 
         # Restore codec if we have a current player and changed codec
         if self._current_player_id and self._codec_changed:
@@ -494,6 +521,13 @@ class AudioInputProvider(PluginProvider):
         self.logger.info("Stopping audio input stream for %s", self.friendly_name)
         self._paused = False
         self._stream_active = False
+
+        # Cancel proactive restore task if running
+        if self._proactive_restore_task and not self._proactive_restore_task.done():
+            self._proactive_restore_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._proactive_restore_task
+        self._proactive_restore_task = None
         
         # Restore original codec when stopping
         await self._restore_original_codec(player_id)
@@ -608,6 +642,9 @@ class AudioInputProvider(PluginProvider):
         if not self._paused or is_chromecast:
             self._capture_proc = await start_arecord_process()
         
+        # Track whether we've successfully started streaming (first chunk emitted)
+        stream_started = False
+
         try:
             # Main streaming loop - keep stream alive but control audio output
             while self._stream_active and not self._stop_called:
@@ -645,6 +682,23 @@ class AudioInputProvider(PluginProvider):
                     )
                     
                     if chunk:
+                        # On first successful chunk, schedule proactive codec restore
+                        if not stream_started:
+                            stream_started = True
+                            if self._codec_changed and self._original_codec and self._original_codec != "wav":
+                                # Cancel any previous task (defensive)
+                                if self._proactive_restore_task and not self._proactive_restore_task.done():
+                                    self._proactive_restore_task.cancel()
+                                    with suppress(asyncio.CancelledError):
+                                        await self._proactive_restore_task
+                                # Schedule restore AFTER stream is up to avoid breaking next provider on fast switch
+                                self._proactive_restore_task = asyncio.create_task(
+                                    self._restore_original_codec_later(player_id, delay=30.0)
+                                )
+                                self.logger.info(
+                                    "🎵 PROACTIVE TASK: Will restore codec for player %s to '%s' in 30s (stream confirmed running)",
+                                    player_id, self._original_codec
+                                )
                         yield chunk
                     else:
                         # arecord ended, mark for restart
@@ -669,7 +723,14 @@ class AudioInputProvider(PluginProvider):
             self.logger.error("Error in audio stream for %s: %s", self.friendly_name, err)
 
         finally:
-            # Restore original codec before cleanup
+            # Cancel proactive restore if still pending; we'll restore immediately below
+            if self._proactive_restore_task and not self._proactive_restore_task.done():
+                self._proactive_restore_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await self._proactive_restore_task
+            self._proactive_restore_task = None
+
+            # Restore original codec before cleanup (if not already restored)
             await self._restore_original_codec(player_id)
             
             # Clean up monitoring task
