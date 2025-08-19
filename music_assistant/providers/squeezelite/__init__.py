@@ -45,6 +45,7 @@ from music_assistant.constants import (
     CONF_ENTRY_HTTP_PROFILE_FORCED_2,
     CONF_ENTRY_OUTPUT_CODEC,
     CONF_ENTRY_SYNC_ADJUST,
+    CONF_OUTPUT_CODEC,
     CONF_PORT,
     CONF_SYNC_ADJUST,
     DEFAULT_PCM_FORMAT,
@@ -365,11 +366,18 @@ class SlimprotoProvider(PlayerProvider):
             return
 
         # this is a syncgroup, we need to handle this with a multi client stream
-        master_audio_format = AudioFormat(
-            content_type=DEFAULT_PCM_FORMAT.content_type,
-            sample_rate=DEFAULT_PCM_FORMAT.sample_rate,
-            bit_depth=DEFAULT_PCM_FORMAT.bit_depth,
-        )
+        # For plugin sources, use the plugin's native audio format to enable WAV fast-path
+        if media.media_type == MediaType.PLUGIN_SOURCE:
+            plugin_prov = self.mass.get_provider(media.custom_data["source_id"])
+            plugin_source = plugin_prov.get_source()
+            master_audio_format = plugin_source.audio_format
+        else:
+            master_audio_format = AudioFormat(
+                content_type=DEFAULT_PCM_FORMAT.content_type,
+                sample_rate=DEFAULT_PCM_FORMAT.sample_rate,
+                bit_depth=DEFAULT_PCM_FORMAT.bit_depth,
+            )
+
         if media.media_type == MediaType.ANNOUNCEMENT:
             # special case: stream announcement
             audio_source = self.mass.streams.get_announcement_stream(
@@ -413,11 +421,16 @@ class SlimprotoProvider(PlayerProvider):
         self._multi_streams[player_id] = stream = MultiClientStream(
             audio_source=audio_source, audio_format=master_audio_format
         )
-        base_url = f"{self.mass.streams.base_url}/slimproto/multi?player_id={player_id}&fmt=flac"
 
         # forward to downstream play_media commands
         async with TaskManager(self.mass) as tg:
             for slimplayer in self._get_sync_clients(player_id):
+                # Get the configured output codec for each child player
+                conf_output_codec = self.mass.config.get_raw_player_config_value(
+                    slimplayer.player_id, CONF_OUTPUT_CODEC, "wav"
+                )
+                fmt = str(conf_output_codec).split(";")[0].strip().lower() or "wav"
+                base_url = f"{self.mass.streams.base_url}/slimproto/multi?player_id={player_id}&fmt={fmt}"
                 url = f"{base_url}&child_player_id={slimplayer.player_id}"
                 stream.expected_clients += 1
                 tg.create_task(
@@ -810,11 +823,13 @@ class SlimprotoProvider(PlayerProvider):
             # not a sync group, continue
             await slimplayer.unpause_at(slimplayer.jiffies)
             return
+
+        # Reduce wait time for faster multi-client startup
         count = 0
-        while count < 40:
+        while count < 10:  # Reduced from 40 to 10 (2 seconds max instead of 8 seconds)
             childs_total = 0
             childs_ready = 0
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.1)  # Reduced from 0.2 to 0.1 for faster polling
             for sync_child in self._get_sync_clients(player.player_id):
                 childs_total += 1
                 if sync_child.state == SlimPlayerState.BUFFER_READY:
@@ -833,7 +848,8 @@ class SlimprotoProvider(PlayerProvider):
                 # Instead just start playback on all players and let the sync logic work out
                 # the delays etc.
                 self._do_not_resync_before[_client.player_id] = time.time() + 1
-                tg.create_task(_client.pause_for(200))
+                # Reduce initial pause delay from 200ms to 50ms for faster startup
+                tg.create_task(_client.pause_for(50))
 
     async def _handle_connected(self, slimplayer: SlimClient) -> None:
         """Handle a slimplayer connected event."""
@@ -950,14 +966,31 @@ class SlimprotoProvider(PlayerProvider):
             "Start serving multi-client flow audio stream to %s",
             child_player.display_name,
         )
-        output_format = AudioFormat(content_type=ContentType.try_parse(fmt))
+
+        # Parse base content-type and build a *fully specified* AudioFormat
+        base_ct = ContentType.try_parse((fmt or "").split(";")[0])
+        output_format = AudioFormat(
+            content_type=base_ct,
+            sample_rate=stream.audio_format.sample_rate,
+            bit_depth=stream.audio_format.bit_depth,
+            channels=stream.audio_format.channels,
+        )
+
+        # WAV fast-pass: disable filters entirely so ffmpeg is not spawned
+        if base_ct == ContentType.WAV:
+            filter_params = None
+        else:
+            filter_params = (
+                get_player_filter_params(
+                    self.mass, child_player_id, stream.audio_format, output_format
+                )
+                if child_player_id
+                else None
+            )
+
         async for chunk in stream.get_stream(
             output_format=output_format,
-            filter_params=get_player_filter_params(
-                self.mass, child_player_id, stream.audio_format, output_format
-            )
-            if child_player_id
-            else None,
+            filter_params=filter_params,
         ):
             try:
                 await resp.write(chunk)
