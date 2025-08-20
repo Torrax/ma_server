@@ -670,25 +670,83 @@ class SlimprotoProvider(PlayerProvider):
             self.mass.players.update(parent_player.player_id, skip_forward=True)
 
     # -------------------------
+    # UNGROUP: ensure stream is rebuilt correctly and collapse single-member groups
+    # -------------------------
 
     async def cmd_ungroup(self, player_id: str) -> None:
         """Handle UNGROUP command for given player.
 
         Remove the given player from any (sync)groups it currently is grouped to.
-
-            - player_id: player_id of the player to handle the command.
         """
         player = self.mass.players.get(player_id, raise_unavailable=True)
-        if player.synced_to:
-            group_leader = self.mass.players.get(player.synced_to, raise_unavailable=True)
-            if player_id in group_leader.group_childs:
-                group_leader.group_childs.remove(player_id)
-            player.synced_to = None
-            if slimclient := self.slimproto.get_player(player_id):
-                await slimclient.stop()
-            # make sure that the player manager gets an update
+        if not player.synced_to:
+            return
+
+        group_leader = self.mass.players.get(player.synced_to, raise_unavailable=True)
+
+        # Remove child from the leader's group list
+        if player_id in group_leader.group_childs:
+            group_leader.group_childs.remove(player_id)
+        player.synced_to = None
+
+        # Stop the ungrouped child immediately
+        if slimclient := self.slimproto.get_player(player_id):
+            await slimclient.stop()
+
+        # Sanitize leader's group list: remove self if it is the only remaining entry
+        # (so single-device playback returns to the normal/single path)
+        # Also dedupe the list defensively.
+        group_leader.group_childs = list({pid for pid in group_leader.group_childs if pid != group_leader.player_id})
+        if not group_leader.group_childs:
+            # no real children left -> collapse to single device
+            pass  # list already empty
+
+        # Rebuild playback based on current source
+        try:
+            plugin_active, plugin_id = self._detect_active_pluginsource(group_leader)
+            active_queue = self.mass.player_queues.get_active_queue(group_leader.player_id)
+
+            if plugin_active and plugin_id:
+                # Stop the leader briefly and restart the plugin source so remaining members (if any)
+                # attach to a fresh multi-client session or single path if no children remain.
+                if (sp := self.slimproto.get_player(group_leader.player_id)) is not None:
+                    await sp.stop()
+                try:
+                    source_provider = self.mass.get_provider(plugin_id)
+                    if isinstance(source_provider, PluginProvider):
+                        source = source_provider.get_source()
+                        media = PlayerMedia(
+                            uri=await self.mass.streams.get_plugin_source_url(
+                                plugin_id, group_leader.player_id
+                            ),
+                            title=source.name,
+                            image_url=getattr(source.metadata, "image_url", None),
+                            media_type=MediaType.PLUGIN_SOURCE,
+                            custom_data={"source_id": plugin_id, "player_id": group_leader.player_id},
+                        )
+                        await self.play_media(group_leader.player_id, media)
+                    else:
+                        self.mass.players.update(group_leader.player_id, skip_forward=True)
+                except Exception:
+                    self.mass.players.update(group_leader.player_id, skip_forward=True)
+            elif active_queue.state == PlayerState.PLAYING:
+                # Queue-backed playback: resume to push the correct URL topology
+                self.mass.call_later(
+                    1,
+                    self.mass.player_queues.resume,
+                    active_queue.queue_id,
+                    fade_in=False,
+                    task_id=f"resume_{active_queue.queue_id}",
+                )
+            else:
+                # Nothing playing, just push updates
+                self.mass.players.update(group_leader.player_id, skip_forward=True)
+        finally:
+            # Always update both players in manager
             self.mass.players.update(player.player_id, skip_forward=True)
             self.mass.players.update(group_leader.player_id, skip_forward=True)
+
+    # -------------------------
 
     def _client_callback(
         self,
