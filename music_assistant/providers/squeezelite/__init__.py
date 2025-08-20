@@ -386,6 +386,7 @@ class SlimprotoProvider(PlayerProvider):
                 output_format=master_audio_format,
                 use_pre_announce=media.custom_data["use_pre_announce"],
             )
+            prefer_wav_fastpass = False
         elif media.media_type == MediaType.PLUGIN_SOURCE:
             # special case: plugin source stream
             # Use the plugin source's native audio format (likely PCM), enabling WAV fast-pass.
@@ -399,18 +400,21 @@ class SlimprotoProvider(PlayerProvider):
                 # because this could have been a group
                 player_id=media.custom_data["player_id"],
             )
+            prefer_wav_fastpass = master_audio_format.content_type.is_pcm()
         elif media.queue_id.startswith("ugp_"):
             # special case: UGP stream
             ugp_provider: PlayerGroupProvider = self.mass.get_provider("player_group")
             ugp_stream = ugp_provider.ugp_streams[media.queue_id]
             # Filter is later applied in MultiClientStream
             audio_source = ugp_stream.get_stream(master_audio_format, filter_params=None)
+            prefer_wav_fastpass = False
         elif media.media_type == MediaType.RADIO:
             # use single item stream request for radio streams
             audio_source = self.mass.streams.get_queue_item_stream(
                 queue_item=self.mass.player_queues.get_item(media.queue_id, media.queue_item_id),
                 pcm_format=master_audio_format,
             )
+            prefer_wav_fastpass = False
         elif media.queue_id and media.queue_item_id:
             # regular queue stream request
             audio_source = self.mass.streams.get_queue_flow_stream(
@@ -420,6 +424,7 @@ class SlimprotoProvider(PlayerProvider):
                 ),
                 pcm_format=master_audio_format,
             )
+            prefer_wav_fastpass = False
         else:
             # assume url or some other direct path
             # NOTE: this will fail if its an uri not playable by ffmpeg
@@ -428,6 +433,7 @@ class SlimprotoProvider(PlayerProvider):
                 input_format=AudioFormat(ContentType.try_parse(media.uri)),
                 output_format=master_audio_format,
             )
+            prefer_wav_fastpass = False
 
         # Determine how many children will connect and set once up-front
         children = list(self._get_sync_clients(player_id))
@@ -438,6 +444,7 @@ class SlimprotoProvider(PlayerProvider):
             audio_source=audio_source,
             audio_format=master_audio_format,
             expected_clients=expected,  # ensure the runner doesn't stop before clients attach
+            prefer_wav_fastpass=prefer_wav_fastpass,
         )
 
         base_url_prefix = f"{self.mass.streams.base_url}/slimproto/multi?player_id={player_id}"
@@ -583,11 +590,35 @@ class SlimprotoProvider(PlayerProvider):
         parent_player.group_childs.append(child_player.player_id)
         child_player.synced_to = parent_player.player_id
         # check if we should (re)start or join a stream session
-        # TODO: support late joining of a client into an existing stream session
-        # so it doesn't need to be restarted anymore.
         active_queue = self.mass.player_queues.get_active_queue(parent_player.player_id)
+
+        # If a multi-client stream is already running for the parent, attach the new child immediately.
         if active_queue.state == PlayerState.PLAYING:
-            # playback needs to be restarted to form a new multi client stream session
+            stream = self._multi_streams.get(parent_player.player_id)
+            if stream and not stream.done:
+                if slim_child := self.slimproto.get_player(child_player.player_id):
+                    base_url_prefix = (
+                        f"{self.mass.streams.base_url}/slimproto/multi?player_id={parent_player.player_id}"
+                    )
+                    fmt = "wav" if getattr(stream, "prefer_wav_fastpass", False) else "flac"
+                    url = f"{base_url_prefix}&fmt={fmt}&child_player_id={slim_child.player_id}"
+                    # reuse current media metadata if available; otherwise a minimal placeholder
+                    parent_mass_player = self.mass.players.get(parent_player.player_id)
+                    media = parent_mass_player.current_media or PlayerMedia(uri=url)
+                    # Start the child immediately; sync logic will converge drift.
+                    await self._handle_play_url(
+                        slim_child,
+                        url=url,
+                        media=media,
+                        send_flush=True,
+                        auto_play=True,
+                    )
+                    # push state updates
+                    self.mass.players.update(child_player.player_id, skip_forward=True)
+                    self.mass.players.update(parent_player.player_id, skip_forward=True)
+                    return
+
+            # fallback: playback needs to be restarted to form a new multi client stream session
             # this could potentially be called by multiple players at the exact same time
             # so we debounce the resync a bit here with a timer
             self.mass.call_later(
