@@ -622,10 +622,17 @@ class SlimprotoProvider(PlayerProvider):
             raise RuntimeError("Parent player is already synced!")
         if child_player.synced_to and child_player.synced_to != target_player:
             raise RuntimeError("Player is already synced to another player")
-        # always make sure that the parent player is part of the sync group
-        parent_player.group_childs.append(parent_player.player_id)
-        parent_player.group_childs.append(child_player.player_id)
+
+        # ensure unique membership (avoid duplicates that break expected_clients)
+        ids = set(parent_player.group_childs)
+        ids.add(parent_player.player_id)
+        ids.add(child_player.player_id)
+        parent_player.group_childs = list(ids)
         child_player.synced_to = parent_player.player_id
+
+        # kill any existing multi stream for the group leader before rebuilding
+        if (prev := self._multi_streams.pop(parent_player.player_id, None)) is not None:
+            await prev.stop()
 
         # decide how to (re)start playback for the new group
         active_queue = self.mass.player_queues.get_active_queue(parent_player.player_id)
@@ -693,13 +700,12 @@ class SlimprotoProvider(PlayerProvider):
         if slimclient := self.slimproto.get_player(player_id):
             await slimclient.stop()
 
-        # Sanitize leader's group list: remove self if it is the only remaining entry
-        # (so single-device playback returns to the normal/single path)
-        # Also dedupe the list defensively.
+        # Deduplicate remaining children and drop leader-id if it slipped in
         group_leader.group_childs = list({pid for pid in group_leader.group_childs if pid != group_leader.player_id})
-        if not group_leader.group_childs:
-            # no real children left -> collapse to single device
-            pass  # list already empty
+
+        # kill any existing multi stream for the leader before rebuilding
+        if (prev := self._multi_streams.pop(group_leader.player_id, None)) is not None:
+            await prev.stop()
 
         # Rebuild playback based on current source
         try:
@@ -899,7 +905,7 @@ class SlimprotoProvider(PlayerProvider):
             # we only correct sync members, not the sync master itself
             return
         if not (sync_master := self.slimproto.get_player(sync_master_id)):
-            return  # just here as a guard as bad things can happen
+            return  # just in case
 
         if sync_master.state != SlimPlayerState.PLAYING:
             return
@@ -908,8 +914,7 @@ class SlimprotoProvider(PlayerProvider):
         if slimplayer.player_id not in self._sync_playpoints:
             return
 
-        # we collect a few playpoints of the player to determine
-        # average lag/drift so we can adjust accordingly
+        # collect a few playpoints of the player to determine average lag/drift
         sync_playpoints = self._sync_playpoints[slimplayer.player_id]
 
         now = time.time()
@@ -918,10 +923,8 @@ class SlimprotoProvider(PlayerProvider):
 
         last_playpoint = sync_playpoints[-1] if sync_playpoints else None
         if last_playpoint and (now - last_playpoint.timestamp) > 10:
-            # last playpoint is too old, invalidate
             sync_playpoints.clear()
         if last_playpoint and last_playpoint.sync_master != sync_master.player_id:
-            # this should not happen, but just in case
             sync_playpoints.clear()
 
         diff = int(
@@ -936,48 +939,39 @@ class SlimprotoProvider(PlayerProvider):
         ):
             return
 
-        # we can now append the current playpoint to our list
+        # append the current playpoint
         sync_playpoints.append(SyncPlayPoint(now, sync_master.player_id, diff))
 
         min_req_playpoints = 2 if sync_master.elapsed_seconds < 2 else MIN_REQ_PLAYPOINTS
         if len(sync_playpoints) < min_req_playpoints:
             return
 
-        # get the average diff
+        # average diff
         avg_diff = statistics.fmean(x.diff for x in sync_playpoints)
         delta = int(abs(avg_diff))
 
         if delta < MIN_DEVIATION_ADJUST:
             return
 
-        # resync the player by skipping ahead or pause for x amount of (milli)seconds
+        # resync: skip ahead or pause
         sync_playpoints.clear()
         self._do_not_resync_before[player.player_id] = now + 5
         if avg_diff > MAX_SKIP_AHEAD_MS:
-            # player lagging behind more than MAX_SKIP_AHEAD_MS,
-            # we need to correct the sync_master
             self.logger.debug("%s resync: pauseFor %sms", sync_master.name, delta)
             self.mass.create_task(sync_master.pause_for(delta))
         elif avg_diff > 0:
-            # handle player lagging behind, fix with skip_ahead
             self.logger.debug("%s resync: skipAhead %sms", player.display_name, delta)
             self.mass.create_task(slimplayer.skip_over(delta))
         else:
-            # handle player is drifting too far ahead, use pause_for to adjust
             self.logger.debug("%s resync: pauseFor %sms", player.display_name, delta)
             self.mass.create_task(slimplayer.pause_for(delta))
 
     async def _handle_buffer_ready(self, slimplayer: SlimClient) -> None:
-        """Handle buffer ready event, player has buffered a (new) track.
-
-        Only used when autoplay=0 for coordinated start of synced players.
-        """
+        """Handle buffer ready event, player has buffered a (new) track."""
         player = self.mass.players.get(slimplayer.player_id)
         if player.synced_to:
-            # unpause of sync child is handled by sync master
             return
         if not player.group_childs:
-            # not a sync group, continue
             await slimplayer.unpause_at(slimplayer.jiffies)
             return
         count = 0
@@ -998,10 +992,6 @@ class SlimprotoProvider(PlayerProvider):
                 self._sync_playpoints.setdefault(
                     _client.player_id, deque(maxlen=MIN_REQ_PLAYPOINTS)
                 ).clear()
-                # NOTE: Officially you should do an unpause_at based on the player timestamp
-                # but I did not have any good results with that.
-                # Instead just start playback on all players and let the sync logic work out
-                # the delays etc.
                 self._do_not_resync_before[_client.player_id] = time.time() + 1
                 tg.create_task(_client.pause_for(200))
 
@@ -1026,9 +1016,8 @@ class SlimprotoProvider(PlayerProvider):
         await slimplayer.volume_set(init_volume)
 
     def _get_sync_clients(self, player_id: str) -> Iterator[SlimClient]:
-        """Get all sync clients for a player."""
+        """Get all sync clients for a player (including the leader)."""
         player = self.mass.players.get(player_id)
-        # we need to return the player itself too
         group_child_ids = {player_id}
         group_child_ids.update(player.group_childs)
         for child_id in group_child_ids:
@@ -1145,7 +1134,7 @@ class SlimprotoProvider(PlayerProvider):
             try:
                 await resp.write(chunk)
             except (BrokenPipeError, ConnectionResetError, ConnectionError):
-                # race condition
+                # client disconnected
                 break
 
         return resp
