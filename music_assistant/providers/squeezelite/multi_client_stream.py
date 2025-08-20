@@ -103,8 +103,8 @@ class MultiClientStream:
 
     async def _runner(self) -> None:
         """Run the stream for the given audio source."""
-        expected_clients = self.expected_clients or 1
-        # wait for first/all subscriber
+        # wait up to 5s for all expected subscribers to attach
+        expected_clients = max(1, int(self.expected_clients or 1))
         count = 0
         while count < 50:
             await asyncio.sleep(0.1)
