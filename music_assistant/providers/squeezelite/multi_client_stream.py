@@ -22,14 +22,14 @@ class MultiClientStream:
         audio_source: AsyncGenerator[bytes, None],
         audio_format: AudioFormat,
         expected_clients: int = 0,
-        prefer_wav_fastpass: bool = False,
+        allow_wav_fastpass: bool = False,  # <-- gate enabled only for CUSTOM plugin source
     ) -> None:
         """Initialize MultiClientStream."""
         self.audio_source = audio_source
         self.audio_format = audio_format
         self.subscribers: list[asyncio.Queue] = []
         self.expected_clients = expected_clients
-        self.prefer_wav_fastpass = prefer_wav_fastpass
+        self.allow_wav_fastpass = allow_wav_fastpass
         self.task = asyncio.create_task(self._runner())
 
     @property
@@ -53,14 +53,16 @@ class MultiClientStream:
         filter_params: list[str] | None = None,
     ) -> AsyncGenerator[bytes, None]:
         """Get (client specific encoded) ffmpeg stream."""
-        # WAV fast-path: bypass ffmpeg when output = WAV and formats match and no filters
+        # WAV fast-path is allowed ONLY when explicitly enabled (CUSTOM plugin source),
+        # output is WAV, formats match, and no filters are needed.
         same_format = (
             (output_format.sample_rate or 0) == (self.audio_format.sample_rate or 0)
             and (output_format.bit_depth or 0) == (self.audio_format.bit_depth or 0)
             and (output_format.channels or 0) == (self.audio_format.channels or 0)
         )
         if (
-            output_format.content_type == ContentType.WAV
+            self.allow_wav_fastpass
+            and output_format.content_type == ContentType.WAV
             and same_format
             and not filter_params
         ):
@@ -78,7 +80,7 @@ class MultiClientStream:
                 yield chunk
             return
 
-        # default ffmpeg path for format conversion / filtering
+        # default ffmpeg path for format conversion / filtering (FLAC, etc.)
         async for chunk in get_ffmpeg_stream(
             audio_input=self.subscribe_raw(),
             input_format=self.audio_format,
@@ -104,7 +106,7 @@ class MultiClientStream:
     async def _runner(self) -> None:
         """Run the stream for the given audio source."""
         expected_clients = self.expected_clients or 1
-        # wait for first/all subscriber
+        # wait for first/all subscribers (keep original timing)
         count = 0
         while count < 50:
             await asyncio.sleep(0.1)
