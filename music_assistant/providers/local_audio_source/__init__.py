@@ -1,11 +1,12 @@
 """
-Live-Audio-Input plugin for Music Assistant
-==========================================
+
+Local Audio Source plugin for Music Assistant
 
 Captures raw PCM from a user-selected ALSA/Pulse (via ALSA) input and forwards it
 to a Music Assistant player through an ultra-low-latency CUSTOM stream.
 
 Author: (@Torrax)
+
 """
 
 from __future__ import annotations
@@ -64,7 +65,7 @@ async def setup(
     mass: MusicAssistant, manifest: ProviderManifest, config: ProviderConfig
 ) -> ProviderInstanceType:
     """Create plugin instance."""
-    return AudioInputProvider(mass, manifest, config)
+    return LocalAudioSourceProvider(mass, manifest, config)
 
 
 async def get_config_entries(
@@ -87,7 +88,7 @@ async def get_config_entries(
             key=CONF_FRIENDLY_NAME,
             type=ConfigEntryType.STRING,
             label="Display Name",
-            default_value="Live Line-In",
+            default_value="Local Audio Source",
             required=True,
         ),
         ConfigEntry(
@@ -185,7 +186,7 @@ async def _get_available_input_devices() -> list[ConfigValueOption]:
 # ------------------------------------------------------------------
 
 
-class AudioInputProvider(PluginProvider):
+class LocalAudioSourceProvider(PluginProvider):
     """Realtime audio-capture provider."""
 
     def __init__(
@@ -225,7 +226,7 @@ class AudioInputProvider(PluginProvider):
         self._proactive_restore_task: asyncio.Task | None = None  # type: ignore[type-arg]
 
         # Static plugin-wide audio source definition
-        metadata = PlayerMedia("Live Audio Input")
+        metadata = PlayerMedia("Local Audio Source")
         if self.thumbnail_image and self.thumbnail_image.startswith(("http://", "https://")):
             metadata.image_url = self.thumbnail_image
         elif self.thumbnail_image:
@@ -445,7 +446,7 @@ class AudioInputProvider(PluginProvider):
 
     async def unload(self, is_removed: bool = False) -> None:
         """Tear down."""
-        self.logger.info("Unloading audio input provider %s", self.friendly_name)
+        self.logger.info("Unloading local audio source provider %s", self.friendly_name)
         self._stop_called = True
         self._stream_active = False
 
@@ -490,7 +491,7 @@ class AudioInputProvider(PluginProvider):
             except Exception:
                 continue
 
-        self.logger.info("Audio input provider %s unloaded", self.friendly_name)
+        self.logger.info("Local audio source provider %s unloaded", self.friendly_name)
 
     # ---------------- PluginProvider hooks ----------------
 
@@ -499,8 +500,8 @@ class AudioInputProvider(PluginProvider):
         return self._source_details
 
     async def cmd_pause(self, player_id: str) -> None:
-        """Handle pause command for the audio input stream."""
-        self.logger.info("Pausing audio input stream for %s - stopping arecord but keeping stream alive", self.friendly_name)
+        """Handle pause command for the local audio source stream."""
+        self.logger.info("Pausing local audio source stream for %s - stopping arecord but keeping stream alive", self.friendly_name)
         self._paused = True
         
         # Stop the current capture process
@@ -511,14 +512,14 @@ class AudioInputProvider(PluginProvider):
             self._capture_proc = None
 
     async def cmd_play(self, player_id: str) -> None:
-        """Handle play/resume command for the audio input stream."""
-        self.logger.info("Resuming audio input stream for %s - will restart fresh arecord", self.friendly_name)
+        """Handle play/resume command for the local audio source stream."""
+        self.logger.info("Resuming local audio source stream for %s - will restart fresh arecord", self.friendly_name)
         self._paused = False
         # The arecord process will be restarted fresh in the stream loop
 
     async def cmd_stop(self, player_id: str) -> None:
-        """Handle stop command for the audio input stream."""
-        self.logger.info("Stopping audio input stream for %s", self.friendly_name)
+        """Handle stop command for the local audio source stream."""
+        self.logger.info("Stopping local audio source stream for %s", self.friendly_name)
         self._paused = False
         self._stream_active = False
 
@@ -543,7 +544,7 @@ class AudioInputProvider(PluginProvider):
         """Yield raw PCM from arecord directly to MA (low-latency CUSTOM stream)."""
         self._stream_active = True
         self._current_player_id = player_id
-        self.logger.info("Audio input stream requested for %s by player %s", self.friendly_name, player_id)
+        self.logger.info("Local audio source stream requested for %s by player %s", self.friendly_name, player_id)
 
         # The codec should already be set to WAV at this point
         # but let's verify and set it if needed as a fallback
@@ -747,7 +748,7 @@ class AudioInputProvider(PluginProvider):
                     await self._capture_proc.close(True)
                 self._capture_proc = None
 
-        self.logger.info("Audio stream ended for %s", self.friendly_name)
+        self.logger.info("Local audio source stream ended for %s", self.friendly_name)
 
     # ---------------- Internals ----------------
 

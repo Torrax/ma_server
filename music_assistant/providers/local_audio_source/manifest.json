@@ -1,8 +1,8 @@
 {
   "type": "plugin",
-  "domain": "audio_input",
+  "domain": "local_audio_source",
   "stage": "alpha",
-  "name": "Live Audio Input",
+  "name": "Local Audio Source",
   "description": "Pipe realtime audio from a local capture device (e.g. Bluetooth receiver or line-in) to any Music Assistant player.",
   "codeowners": ["@Torrax"],
   "documentation": "",
