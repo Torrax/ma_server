@@ -55,8 +55,6 @@ BUFFER_US = 20000            # arecord -B (small multiple of PERIOD_US)
 # Debounce/backoff to prevent start/stop thrash during regrouping
 PAUSE_DEBOUNCE_S = 0.5
 RESUME_DEBOUNCE_S = 0.5
-RESTART_BACKOFF_BASE_S = 0.25
-RESTART_BACKOFF_MAX_S = 1.5
 
 # ------------------------------------------------------------------
 # PROVIDER SET-UP / CONFIG DIALOG
@@ -180,7 +178,6 @@ class LocalAudioSourceProvider(PluginProvider):
         self._last_state = None
         self._state_since = time.monotonic()
         self._last_start_ts = 0.0
-        self._restart_count = 0
         self._active_stream_id: int | None = None
 
         # Codec management for WAV output
@@ -369,64 +366,34 @@ class LocalAudioSourceProvider(PluginProvider):
         period_s = max(1, self.period_us) / 1_000_000
         chunk_size = max(256, int(bytes_per_sec * period_s))
 
-        base_cmd: list[str] = [
+        # Single arecord command (no fallbacks/retries)
+        arecord_cmd: list[str] = [
             "arecord",
+            "-q",
             "-D", self.alsa_device,
             "-f", "S16_LE",
             "-c", str(self.channels),
             "-r", str(self.sample_rate),
             "-t", "raw",
             "-M",
-            "-q",
             "-F", str(self.period_us),
             "-B", str(self.buffer_us),
             "-"
         ]
 
-        fallbacks = [
-            {"F": self.period_us * 2, "B": self.buffer_us * 3},
-            {"F": 40000, "B": 120000},
-        ]
-
-        attempt_cmds: list[list[str]] = [base_cmd] + [[
-            "arecord", "-D", self.alsa_device, "-f", "S16_LE",
-            "-c", str(self.channels), "-r", str(self.sample_rate),
-            "-t", "raw", "-M", "-q", "-F", str(fb["F"]), "-B", str(fb["B"]), "-"
-        ] for fb in fallbacks]
-
-        async def start_arecord_process() -> AsyncProcess | None:
-            nonlocal my_stream_id
-            now = time.monotonic()
-            if now - self._last_start_ts < 0.5:
-                self._restart_count += 1
-            else:
-                self._restart_count = 0
-            self._last_start_ts = now
-
-            if self._restart_count >= 3:
-                backoff = min(RESTART_BACKOFF_BASE_S * (2 ** (self._restart_count - 2)), RESTART_BACKOFF_MAX_S)
-                await asyncio.sleep(backoff)
-
-            last_err: Exception | None = None
-            for idx, cmd in enumerate(attempt_cmds, start=1):
-                F_val = cmd[cmd.index("-F")+1]
-                B_val = cmd[cmd.index("-B")+1]
-                self.logger.info(
-                    "Starting capture for %s (dev=%s sr=%d ch=%d F=%sµs B=%sµs chunk=%dB) [%d/%d]",
-                    self.friendly_name, self.alsa_device, self.sample_rate, self.channels,
-                    F_val, B_val, chunk_size, idx, len(attempt_cmds)
-                )
-                proc = AsyncProcess(cmd, stdout=True, stderr=True, name=f"audio-capture[{self.friendly_name}]")
-                try:
-                    await proc.start()
-                    return proc
-                except Exception as err:
-                    last_err = err
-                    self.logger.warning("arecord failed to start (attempt %d): %s", idx, err)
-                    continue
-
-            self.logger.error("All arecord attempts failed for %s: %s", self.friendly_name, last_err)
-            return None
+        async def start_arecord_once() -> AsyncProcess | None:
+            self.logger.info(
+                "Starting capture for %s (dev=%s sr=%d ch=%d F=%dµs B=%dµs chunk=%dB)",
+                self.friendly_name, self.alsa_device, self.sample_rate, self.channels,
+                self.period_us, self.buffer_us, chunk_size
+            )
+            proc = AsyncProcess(arecord_cmd, stdout=True, stderr=True, name=f"audio-capture[{self.friendly_name}]")
+            try:
+                await proc.start()
+                return proc
+            except Exception as err:
+                self.logger.error("arecord failed to start: %s", err)
+                return None
 
         early_restored = False
 
@@ -443,9 +410,10 @@ class LocalAudioSourceProvider(PluginProvider):
 
                 async with self._capture_lock:
                     if not self._capture_proc or self._capture_proc.closed:
-                        self._capture_proc = await start_arecord_process()
+                        self._capture_proc = await start_arecord_once()
 
                 if not self._capture_proc:
+                    # couldn't start; wait a bit and try again in next loop iteration
                     await asyncio.sleep(period_s)
                     continue
 
