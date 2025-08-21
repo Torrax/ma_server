@@ -52,7 +52,7 @@ SAMPLE_RATE_HZ = 44100       # arecord -r
 PERIOD_US = 10000            # arecord -F (ALSA period)
 BUFFER_US = 20000            # arecord -B (small multiple of PERIOD_US)
 
-# Debounce/backoff to prevent start/stop thrash during regrouping
+# Debounce to prevent start/stop thrash during regrouping
 PAUSE_DEBOUNCE_S = 0.5
 RESUME_DEBOUNCE_S = 0.5
 
@@ -168,8 +168,6 @@ class LocalAudioSourceProvider(PluginProvider):
 
         # Runtime helpers
         self._capture_proc: AsyncProcess | None = None
-        self._runner_task: asyncio.Task | None = None          # type: ignore[type-arg]
-        self._stop_called = False
         self._paused = False
         self._stream_active = False
         self._current_player_id: str | None = None
@@ -177,7 +175,6 @@ class LocalAudioSourceProvider(PluginProvider):
         self._capture_lock = asyncio.Lock()
         self._last_state = None
         self._state_since = time.monotonic()
-        self._last_start_ts = 0.0
         self._active_stream_id: int | None = None
 
         # Codec management for WAV output
@@ -216,18 +213,6 @@ class LocalAudioSourceProvider(PluginProvider):
     def supported_features(self) -> set[ProviderFeature]:
         return {ProviderFeature.AUDIO_SOURCE}
 
-    async def handle_async_init(self) -> None:
-        """Called when MA is ready."""
-        original_get_plugin_source_url = self.mass.streams.get_plugin_source_url
-
-        async def patched_get_plugin_source_url(plugin_source: str, player_id: str) -> str:
-            # Ensure WAV before generating URL for this plugin
-            if plugin_source == self.instance_id:
-                await self._save_and_set_wav_codec(player_id)
-            return await original_get_plugin_source_url(plugin_source, player_id)
-
-        self.mass.streams.get_plugin_source_url = patched_get_plugin_source_url
-
     async def _save_and_set_wav_codec(self, player_id: str) -> None:
         """Save current codec and set player to WAV format."""
         try:
@@ -249,6 +234,7 @@ class LocalAudioSourceProvider(PluginProvider):
             return
         try:
             await self.mass.config.save_player_config(player_id=player_id, values={"output_codec": self._original_codec})
+            self.logger.info("Restored player %s codec to '%s'", player_id, self._original_codec)
         except Exception as err:
             self.logger.error("Failed to restore codec for player %s: %s", player_id, err)
         finally:
@@ -261,7 +247,7 @@ class LocalAudioSourceProvider(PluginProvider):
         self._last_state = None
         self._state_since = time.monotonic()
 
-        while self._stream_active and not self._stop_called:
+        while self._stream_active:
             try:
                 player = self.mass.players.get(player_id)
                 if not player:
@@ -286,7 +272,6 @@ class LocalAudioSourceProvider(PluginProvider):
 
     async def unload(self, is_removed: bool = False) -> None:
         """Tear down."""
-        self._stop_called = True
         self._stream_active = False
 
         if self._current_player_id and self._codec_changed:
@@ -304,11 +289,7 @@ class LocalAudioSourceProvider(PluginProvider):
                 await self._monitor_task
         self._monitor_task = None
 
-        if self._runner_task and not self._runner_task.done():
-            self._runner_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._runner_task
-
+        # Refresh player source lists
         for player in self.mass.players.all():
             try:
                 player.source_list = [s for s in player.source_list if s.id != self.instance_id]
@@ -353,7 +334,7 @@ class LocalAudioSourceProvider(PluginProvider):
         self._active_stream_id = (self._active_stream_id or 0) + 1
         my_stream_id = self._active_stream_id
 
-        # ensure WAV for URL generation fallback
+        # ensure WAV before any audio is emitted
         current_codec = await self.mass.config.get_player_config_value(player_id, "output_codec")
         if current_codec != "wav":
             await self._save_and_set_wav_codec(player_id)
@@ -398,7 +379,7 @@ class LocalAudioSourceProvider(PluginProvider):
         early_restored = False
 
         try:
-            while self._stream_active and not self._stop_called and my_stream_id == self._active_stream_id:
+            while self._stream_active and my_stream_id == self._active_stream_id:
                 if self._paused:
                     async with self._capture_lock:
                         if self._capture_proc and not self._capture_proc.closed:
@@ -428,6 +409,7 @@ class LocalAudioSourceProvider(PluginProvider):
                     # On first successful audio, restore original codec in background.
                     if not early_restored and self._codec_changed:
                         early_restored = True
+                        self.logger.info("First audio chunk received; restoring original codec…")
                         asyncio.create_task(self._restore_original_codec(player_id))
 
                     yield chunk
