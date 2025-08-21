@@ -40,23 +40,17 @@ if TYPE_CHECKING:
     from music_assistant.models import ProviderInstanceType
 
 # ------------------------------------------------------------------
-# STATIC AUDIO SETTINGS (edit these as needed)
-# ------------------------------------------------------------------
-
-SAMPLE_RATE_HZ = 44100        # arecord -r
-PERIOD_US = 10000             # arecord -F (ALSA period)
-BUFFER_US = 20000             # arecord -B (small multiple of PERIOD_US)
-
-# ------------------------------------------------------------------
 # CONFIG KEYS
 # ------------------------------------------------------------------
 
 CONF_INPUT_DEVICE = "input_device"             # e.g. "alsa:hw:1,0"
-CONF_CHANNELS = "channels"                     # 1 or 2
 CONF_FRIENDLY_NAME = "friendly_name"           # UI label
 CONF_THUMBNAIL_IMAGE = "thumbnail_image"       # URL only (for now)
 
-DEFAULT_CHANNELS = 2
+CHANNELS = 2                 # 1=Mono, 2=Stereo
+SAMPLE_RATE_HZ = 44100       # arecord -r
+PERIOD_US = 10000            # arecord -F (ALSA period)
+BUFFER_US = 20000            # arecord -B (small multiple of PERIOD_US)
 
 # Debounce/backoff to prevent start/stop thrash during regrouping
 PAUSE_DEBOUNCE_S = 0.5
@@ -88,11 +82,6 @@ async def get_config_entries(
     return (
         CONF_ENTRY_WARN_PREVIEW,
         ConfigEntry(
-            key="display_section",
-            type=ConfigEntryType.LABEL,
-            label="------------ DISPLAY ------------",
-        ),
-        ConfigEntry(
             key=CONF_FRIENDLY_NAME,
             type=ConfigEntryType.STRING,
             label="Display Name",
@@ -108,11 +97,6 @@ async def get_config_entries(
             required=False,
         ),
         ConfigEntry(
-            key="audio_section",
-            type=ConfigEntryType.LABEL,
-            label="------------- AUDIO -------------",
-        ),
-        ConfigEntry(
             key=CONF_INPUT_DEVICE,
             type=ConfigEntryType.STRING,
             label="Audio Input Device",
@@ -120,14 +104,6 @@ async def get_config_entries(
             options=device_options,
             default_value="alsa:hw:1,0",
             required=True,
-        ),
-        ConfigEntry(
-            key=CONF_CHANNELS,
-            type=ConfigEntryType.INTEGER,
-            label="Channels",
-            default_value=DEFAULT_CHANNELS,
-            required=True,
-            options=[ConfigValueOption("Mono", 1), ConfigValueOption("Stereo", 2)],
         ),
     )
 
@@ -180,7 +156,6 @@ class LocalAudioSourceProvider(PluginProvider):
 
         # Resolve config
         self.device: str = cast(str, self.config.get_value(CONF_INPUT_DEVICE))
-        self.channels: int = cast(int, self.config.get_value(CONF_CHANNELS))
         self.friendly_name: str = cast(str, self.config.get_value(CONF_FRIENDLY_NAME))
         self.thumbnail_image: str = cast(str, self.config.get_value(CONF_THUMBNAIL_IMAGE) or "")
 
@@ -188,6 +163,7 @@ class LocalAudioSourceProvider(PluginProvider):
         self.sample_rate: int = SAMPLE_RATE_HZ
         self.period_us: int = PERIOD_US
         self.buffer_us: int = BUFFER_US
+        self.channels: int = CHANNELS
 
         # Parse device string for ALSA (arecord)
         self.alsa_device = self._parse_device_string(self.device)
