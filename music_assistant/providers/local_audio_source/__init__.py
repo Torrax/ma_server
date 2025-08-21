@@ -40,6 +40,14 @@ if TYPE_CHECKING:
     from music_assistant.models import ProviderInstanceType
 
 # ------------------------------------------------------------------
+# STATIC AUDIO SETTINGS (edit these as needed)
+# ------------------------------------------------------------------
+
+SAMPLE_RATE_HZ = 44100        # arecord -r
+PERIOD_US = 10000             # arecord -F (ALSA period)
+BUFFER_US = 20000             # arecord -B (small multiple of PERIOD_US)
+
+# ------------------------------------------------------------------
 # CONFIG KEYS
 # ------------------------------------------------------------------
 
@@ -49,10 +57,6 @@ CONF_FRIENDLY_NAME = "friendly_name"           # UI label
 CONF_THUMBNAIL_IMAGE = "thumbnail_image"       # URL only (for now)
 
 DEFAULT_CHANNELS = 2
-
-SAMPLE_RATE_HZ = 44100        # arecord -r
-PERIOD_US = 10000             # arecord -F (ALSA period)
-BUFFER_US = 20000             # arecord -B (small multiple of PERIOD_US)
 
 # Debounce/backoff to prevent start/stop thrash during regrouping
 PAUSE_DEBOUNCE_S = 0.5
@@ -244,6 +248,7 @@ class LocalAudioSourceProvider(PluginProvider):
         original_get_plugin_source_url = self.mass.streams.get_plugin_source_url
 
         async def patched_get_plugin_source_url(plugin_source: str, player_id: str) -> str:
+            # Ensure WAV before generating URL for this plugin
             if plugin_source == self.instance_id:
                 await self._save_and_set_wav_codec(player_id)
             return await original_get_plugin_source_url(plugin_source, player_id)
@@ -375,10 +380,12 @@ class LocalAudioSourceProvider(PluginProvider):
         self._active_stream_id = (self._active_stream_id or 0) + 1
         my_stream_id = self._active_stream_id
 
+        # ensure WAV for URL generation fallback
         current_codec = await self.mass.config.get_player_config_value(player_id, "output_codec")
         if current_codec != "wav":
             await self._save_and_set_wav_codec(player_id)
 
+        # start player-state monitor
         if not self._monitor_task or self._monitor_task.done():
             self._monitor_task = asyncio.create_task(self._monitor_player_state(player_id))
 
@@ -445,6 +452,8 @@ class LocalAudioSourceProvider(PluginProvider):
             self.logger.error("All arecord attempts failed for %s: %s", self.friendly_name, last_err)
             return None
 
+        early_restored = False
+
         try:
             while self._stream_active and not self._stop_called and my_stream_id == self._active_stream_id:
                 if self._paused:
@@ -471,6 +480,12 @@ class LocalAudioSourceProvider(PluginProvider):
                             self._capture_proc = None
                         await asyncio.sleep(0.05)
                         continue
+
+                    # On first successful audio, restore original codec in background.
+                    if not early_restored and self._codec_changed:
+                        early_restored = True
+                        asyncio.create_task(self._restore_original_codec(player_id))
+
                     yield chunk
                 except asyncio.TimeoutError:
                     continue
@@ -486,6 +501,7 @@ class LocalAudioSourceProvider(PluginProvider):
             self.logger.error("Error in audio stream for %s: %s", self.friendly_name, err)
 
         finally:
+            # Safety net: if not already restored, do it now.
             if my_stream_id == self._active_stream_id:
                 await self._restore_original_codec(player_id)
 
