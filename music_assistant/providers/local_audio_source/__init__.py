@@ -1,7 +1,7 @@
 """
 Local Audio Source plugin for Music Assistant
 
-Captures raw PCM from a user-selected ALSA/Pulse (via ALSA) input and forwards it
+Captures raw PCM from a user-selected ALSA input and forwards it
 to a Music Assistant player through an ultra-low-latency CUSTOM stream.
 
 Author: (@Torrax)
@@ -43,7 +43,7 @@ if TYPE_CHECKING:
 # CONFIG KEYS
 # ------------------------------------------------------------------
 
-CONF_INPUT_DEVICE = "input_device"             # e.g. "alsa:hw:1,0" or "default"
+CONF_INPUT_DEVICE = "input_device"             # e.g. "alsa:hw:1,0"
 CONF_SAMPLE_RATE = "sample_rate"               # int (Hz)
 CONF_CHANNELS = "channels"                     # 1 or 2
 CONF_FRIENDLY_NAME = "friendly_name"           # UI label
@@ -116,7 +116,7 @@ async def get_config_entries(
             label="Audio Input Device",
             description="Select an ALSA capture device (arecord -l).",
             options=device_options,
-            default_value=(device_options[0].value if device_options else "default"),
+            default_value="alsa:hw:1,0",
             required=True,
         ),
         ConfigEntry(
@@ -154,36 +154,32 @@ async def get_config_entries(
 
 
 async def _get_available_input_devices() -> list[ConfigValueOption]:
-    """Scan for available ALSA capture devices using arecord -l."""
+    """Scan for available ALSA capture devices using arecord -l.
+
+    Labels are formatted as: 'hw X,Y - <last [] desc>'.
+    """
     devices: list[ConfigValueOption] = []
     try:
-        # check_output returns (returncode, stdout_bytes)
-        returncode, output = await check_output("arecord", "-l")
-        if returncode == 0:
-            lines = output.decode("utf-8", "ignore").strip().splitlines()
-            # Sample lines:
-            # "card 1: USB [USB Audio], device 0: USB Audio [USB Audio]"
-            for line in lines:
-                if "card " in line and "device " in line:
-                    try:
-                        card = line.split("card ")[1].split(":")[0].strip()
-                        device = line.split("device ")[1].split(":")[0].strip()
-                        # Friendly name portion after the first colon+space
-                        name = line.split(": ", 1)[1].strip() if ": " in line else f"Card {card} Device {device}"
-                        devices.append(
-                            ConfigValueOption(name, f"alsa:hw:{card},{device}")
-                        )
-                    except Exception:
-                        continue
+        rc, out = await check_output("arecord", "-l")
+        if rc == 0:
+            for line in out.decode("utf-8", "ignore").strip().splitlines():
+                # Example: "card 1: USB [USB Audio], device 0: USB Audio [USB Audio]"
+                if not line.startswith("card ") or "device " not in line:
+                    continue
+                try:
+                    after = line.split("card ", 1)[1]
+                    card = after.split(":", 1)[0].strip()
+                    dev = after.split("device ", 1)[1].split(":", 1)[0].strip()
+                    last_desc = line.rsplit("[", 1)[-1].rstrip("]") if "[" in line else f"Card {card} Device {dev}"
+                    label = f"hw {card},{dev} - {last_desc}"
+                    devices.append(ConfigValueOption(label, f"alsa:hw:{card},{dev}"))
+                except Exception:
+                    continue
     except Exception:
-        # arecord not available or failed - will fall back
         pass
 
     if not devices:
-        devices = [
-            ConfigValueOption("Default Audio Input (ALSA)", "default"),
-            ConfigValueOption("Manual Entry (alsa:hw:X,Y)", "alsa:"),
-        ]
+        devices = [ConfigValueOption("Manual Entry (alsa:hw:X,Y)", "alsa:")]
     return devices
 
 
@@ -296,49 +292,30 @@ class LocalAudioSourceProvider(PluginProvider):
     async def _save_and_set_wav_codec(self, player_id: str) -> None:
         """Save current codec and set player to WAV format."""
         try:
-            # Get current codec setting
             current_codec = await self.mass.config.get_player_config_value(
                 player_id, "output_codec"
             )
-
             self.logger.warning(
                 "🎵 CODEC MANAGEMENT: Player %s current codec is '%s'",
                 player_id, current_codec
             )
-
-            # Only change if not already WAV
             if current_codec != "wav":
                 self._original_codec = current_codec
                 self._codec_changed = True
-
-                # Set codec to WAV
                 await self.mass.config.save_player_config(
-                    player_id=player_id,
-                    values={"output_codec": "wav"}
+                    player_id=player_id, values={"output_codec": "wav"}
                 )
-
-                # Clear any cached config values
                 self.mass.config._value_cache.clear()
-
-                # Give the config change time to propagate
                 await asyncio.sleep(0.5)
-
-                # Force player update to ensure config is applied
                 self.mass.players.update(player_id, force_update=True)
-
-                # Additional wait for player update to complete
                 await asyncio.sleep(0.2)
-
-                # Verify the change took effect
                 new_codec = await self.mass.config.get_player_config_value(
                     player_id, "output_codec"
                 )
-
                 self.logger.warning(
                     "🎵 CODEC CHANGED: Player %s codec changed from '%s' to 'WAV' for %s (verified: %s)",
                     player_id, current_codec, self.friendly_name, new_codec
                 )
-
                 if new_codec != "wav":
                     self.logger.error(
                         "🎵 CODEC VERIFICATION FAILED: Expected 'wav' but got '%s' for player %s",
@@ -349,7 +326,6 @@ class LocalAudioSourceProvider(PluginProvider):
                     "🎵 CODEC UNCHANGED: Player %s already using WAV codec for %s",
                     player_id, self.friendly_name
                 )
-
         except Exception as err:
             self.logger.error(
                 "🎵 CODEC ERROR: Failed to set WAV codec for player %s: %s",
@@ -364,26 +340,20 @@ class LocalAudioSourceProvider(PluginProvider):
                 player_id, self._codec_changed, self._original_codec
             )
             return
-
         try:
-            # Restore original codec
             await self.mass.config.save_player_config(
-                player_id=player_id,
-                values={"output_codec": self._original_codec}
+                player_id=player_id, values={"output_codec": self._original_codec}
             )
-
             self.logger.warning(
                 "🎵 CODEC RESTORED: Player %s codec restored from WAV back to '%s' after %s usage",
                 player_id, self._original_codec, self.friendly_name
             )
-
         except Exception as err:
             self.logger.error(
                 "🎵 CODEC RESTORE ERROR: Failed to restore codec for player %s: %s",
                 player_id, err
             )
         finally:
-            # Reset codec management state
             self._original_codec = None
             self._codec_changed = False
 
@@ -403,17 +373,14 @@ class LocalAudioSourceProvider(PluginProvider):
                 current_state = player.state
 
                 if current_state != self._last_state:
-                    # state changed -> reset timer
                     self._last_state = current_state
                     self._state_since = now
 
                 stable_for = now - self._state_since
 
-                # Debounced transitions
                 if current_state == PlayerState.PAUSED and stable_for >= PAUSE_DEBOUNCE_S and not self._paused:
                     self.logger.info("Player %s paused (debounced) - stopping arecord", player_id)
                     self._paused = True
-                    # stop capture (non-blocking here; loop will perform the stop)
                 elif current_state == PlayerState.PLAYING and stable_for >= RESUME_DEBOUNCE_S and self._paused:
                     self.logger.info("Player %s resumed (debounced) - ready to restart arecord", player_id)
                     self._paused = False
@@ -433,11 +400,9 @@ class LocalAudioSourceProvider(PluginProvider):
         self._stop_called = True
         self._stream_active = False
 
-        # Restore codec if we have a current player and changed codec
         if self._current_player_id and self._codec_changed:
             await self._restore_original_codec(self._current_player_id)
 
-        # Stop the capture process first (if any active CUSTOM stream)
         async with self._capture_lock:
             if self._capture_proc and not self._capture_proc.closed:
                 self.logger.info("Terminating capture process for %s", self.friendly_name)
@@ -445,20 +410,17 @@ class LocalAudioSourceProvider(PluginProvider):
                     await self._capture_proc.close(True)
                 self._capture_proc = None
 
-        # Cancel the monitor task
         if self._monitor_task and not self._monitor_task.done():
             self._monitor_task.cancel()
             with suppress(asyncio.CancelledError):
                 await self._monitor_task
         self._monitor_task = None
 
-        # Cancel the runner task (defensive)
         if self._runner_task and not self._runner_task.done():
             self._runner_task.cancel()
             with suppress(asyncio.CancelledError):
                 await self._runner_task
 
-        # Optionally force players to refresh their source lists
         for player in self.mass.players.all():
             try:
                 player.source_list = [
@@ -498,7 +460,6 @@ class LocalAudioSourceProvider(PluginProvider):
         self._paused = False
         self._stream_active = False
 
-        # Restore original codec when stopping
         await self._restore_original_codec(player_id)
 
         async with self._capture_lock:
@@ -512,13 +473,11 @@ class LocalAudioSourceProvider(PluginProvider):
         """Yield raw PCM from arecord directly to MA (low-latency CUSTOM stream)."""
         self._stream_active = True
         self._current_player_id = player_id
-        # unique id for this stream instance (prevents cross-talk if a rebuild overlaps)
         self._active_stream_id = (self._active_stream_id or 0) + 1
         my_stream_id = self._active_stream_id
 
         self.logger.info("Local audio source stream requested for %s by player %s", self.friendly_name, player_id)
 
-        # Ensure codec is WAV (fallback safety)
         current_codec = await self.mass.config.get_player_config_value(player_id, "output_codec")
         if current_codec != "wav":
             self.logger.warning(
@@ -532,16 +491,13 @@ class LocalAudioSourceProvider(PluginProvider):
                 player_id, self.friendly_name
             )
 
-        # Start player state monitoring
         if not self._monitor_task or self._monitor_task.done():
             self._monitor_task = asyncio.create_task(self._monitor_player_state(player_id))
 
-        # Align chunk size to the requested ALSA period
         bytes_per_sec = self.sample_rate * self.channels * 2  # 16-bit PCM
         period_s = max(1, self.period_us) / 1_000_000
         chunk_size = max(256, int(bytes_per_sec * period_s))
 
-        # Primary (aggressive) arecord command
         base_cmd: list[str] = [
             "arecord",
             "-D", self.alsa_device,
@@ -549,39 +505,26 @@ class LocalAudioSourceProvider(PluginProvider):
             "-c", str(self.channels),
             "-r", str(self.sample_rate),
             "-t", "raw",
-            "-M",              # use mmap for lower latency
-            "-q",              # quiet (only errors)
+            "-M",
+            "-q",
             "-F", str(self.period_us),
             "-B", str(self.buffer_us),
-            "-"                # stdout
+            "-"
         ]
 
-        # Fallback settings if the device rejects aggressive period/buffer
         fallbacks = [
-            {"F": self.period_us * 2, "B": self.buffer_us * 3},     # ~20 ms / 60 ms
-            {"F": 40000, "B": 120000},                               # 40 ms / 120 ms
+            {"F": self.period_us * 2, "B": self.buffer_us * 3},
+            {"F": 40000, "B": 120000},
         ]
 
-        attempt_cmds: list[list[str]] = [base_cmd]
-        for fb in fallbacks:
-            attempt_cmds.append([
-                "arecord",
-                "-D", self.alsa_device,
-                "-f", "S16_LE",
-                "-c", str(self.channels),
-                "-r", str(self.sample_rate),
-                "-t", "raw",
-                "-M",
-                "-q",
-                "-F", str(fb["F"]),
-                "-B", str(fb["B"]),
-                "-"
-            ])
+        attempt_cmds: list[list[str]] = [base_cmd] + [[
+            "arecord", "-D", self.alsa_device, "-f", "S16_LE",
+            "-c", str(self.channels), "-r", str(self.sample_rate),
+            "-t", "raw", "-M", "-q", "-F", str(fb["F"]), "-B", str(fb["B"]), "-"
+        ] for fb in fallbacks]
 
         async def start_arecord_process() -> AsyncProcess | None:
-            """Start arecord process with fallback attempts + backoff."""
             nonlocal my_stream_id
-            # backoff if we've restarted too quickly
             now = time.monotonic()
             if now - self._last_start_ts < 0.5:
                 self._restart_count += 1
@@ -619,7 +562,6 @@ class LocalAudioSourceProvider(PluginProvider):
             stream_started = False
 
             while self._stream_active and not self._stop_called and my_stream_id == self._active_stream_id:
-                # Respect paused state (debounced via monitor) — keep stream alive but stop capture
                 if self._paused:
                     async with self._capture_lock:
                         if self._capture_proc and not self._capture_proc.closed:
@@ -630,40 +572,33 @@ class LocalAudioSourceProvider(PluginProvider):
                     await asyncio.sleep(period_s)
                     continue
 
-                # Ensure capture exists
                 async with self._capture_lock:
                     if not self._capture_proc or self._capture_proc.closed:
                         self.logger.info("Starting fresh arecord process for %s (resumed/playing)", self.friendly_name)
                         self._capture_proc = await start_arecord_process()
 
                 if not self._capture_proc:
-                    # Failed to start arecord, wait and retry
                     await asyncio.sleep(period_s)
                     continue
 
-                # Read from arecord
                 try:
                     chunk = await asyncio.wait_for(
                         self._capture_proc.read(chunk_size),
                         timeout=period_s * 2
                     )
                     if not chunk:
-                        # ended (EOF)
                         self.logger.warning("arecord process ended for %s, will restart on next iteration", self.friendly_name)
                         async with self._capture_lock:
                             self._capture_proc = None
                         await asyncio.sleep(0.05)
                         continue
 
-                    # First chunk -> mark started (but DO NOT flip codec back yet; wait till end)
                     if not stream_started:
                         stream_started = True
 
-                    # Yield audio
                     yield chunk
 
                 except asyncio.TimeoutError:
-                    # No data yet; loop
                     continue
                 except Exception as err:
                     self.logger.warning("Error reading from arecord for %s: %s", self.friendly_name, err)
@@ -679,18 +614,15 @@ class LocalAudioSourceProvider(PluginProvider):
             self.logger.error("Error in audio stream for %s: %s", self.friendly_name, err)
 
         finally:
-            # Only the currently-active stream restores codec
             if my_stream_id == self._active_stream_id:
                 await self._restore_original_codec(player_id)
 
-            # Clean up monitoring task
             if self._monitor_task and not self._monitor_task.done():
                 self._monitor_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await self._monitor_task
             self._monitor_task = None
 
-            # Clean up capture process
             async with self._capture_lock:
                 if self._capture_proc and not self._capture_proc.closed:
                     self.logger.info("Stopping arecord process for %s (stream ended)", self.friendly_name)
@@ -698,7 +630,6 @@ class LocalAudioSourceProvider(PluginProvider):
                         await self._capture_proc.close(True)
                     self._capture_proc = None
 
-            # mark inactive
             if my_stream_id == self._active_stream_id:
                 self._stream_active = False
 
@@ -709,11 +640,7 @@ class LocalAudioSourceProvider(PluginProvider):
     def _parse_device_string(self, device: str) -> str:
         """Normalize device string for arecord."""
         if device.startswith("alsa:"):
-            return device[5:] or "default"
-        if device.startswith("pulse:"):
-            # Pulse via ALSA plugin (if present). arecord -D pulse
-            return "pulse"
+            return device[5:] or "hw:1,0"
         if device in ("default", ""):
-            return "default"
-        # Assume it's already a valid ALSA device name
+            return "hw:1,0"
         return device
