@@ -52,7 +52,6 @@ SAMPLE_RATE_HZ = 44100       # arecord -r
 PERIOD_US = 10000            # arecord -F (ALSA period)
 BUFFER_US = 20000            # arecord -B (small multiple of PERIOD_US)
 
-# Debounce to prevent start/stop thrash during regrouping
 PAUSE_DEBOUNCE_S = 0.5
 RESUME_DEBOUNCE_S = 0.5
 
@@ -213,6 +212,18 @@ class LocalAudioSourceProvider(PluginProvider):
     def supported_features(self) -> set[ProviderFeature]:
         return {ProviderFeature.AUDIO_SOURCE}
 
+    async def handle_async_init(self) -> None:
+        """Called when MA is ready."""
+        original_get_plugin_source_url = self.mass.streams.get_plugin_source_url
+
+        async def patched_get_plugin_source_url(plugin_source: str, player_id: str) -> str:
+            # Ensure WAV before generating URL for this plugin
+            if plugin_source == self.instance_id:
+                await self._save_and_set_wav_codec(player_id)
+            return await original_get_plugin_source_url(plugin_source, player_id)
+
+        self.mass.streams.get_plugin_source_url = patched_get_plugin_source_url
+
     async def _save_and_set_wav_codec(self, player_id: str) -> None:
         """Save current codec and set player to WAV format."""
         try:
@@ -334,7 +345,7 @@ class LocalAudioSourceProvider(PluginProvider):
         self._active_stream_id = (self._active_stream_id or 0) + 1
         my_stream_id = self._active_stream_id
 
-        # ensure WAV before any audio is emitted
+        # ensure WAV for URL generation fallback
         current_codec = await self.mass.config.get_player_config_value(player_id, "output_codec")
         if current_codec != "wav":
             await self._save_and_set_wav_codec(player_id)
@@ -394,7 +405,6 @@ class LocalAudioSourceProvider(PluginProvider):
                         self._capture_proc = await start_arecord_once()
 
                 if not self._capture_proc:
-                    # couldn't start; wait a bit and try again in next loop iteration
                     await asyncio.sleep(period_s)
                     continue
 
