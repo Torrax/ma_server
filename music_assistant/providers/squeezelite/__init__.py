@@ -710,8 +710,36 @@ class SlimprotoProvider(PlayerProvider):
     async def cmd_group_many(self, target_player: str, child_player_ids: list[str]) -> None:
         """Handle GROUP_MANY command - group multiple players to a target player."""
         # For squeezelite, we handle this by calling cmd_group for each child player
+        self.logger.debug(
+            "🎵 GROUP_MANY: Grouping %s players to %s: %s",
+            len(child_player_ids), target_player, child_player_ids
+        )
+        
+        # Get the target player and ensure it exists
+        parent_player = self.mass.players.get(target_player)
+        if not parent_player:
+            raise RuntimeError(f"Target player {target_player} not found")
+        
+        # Process each child player individually
         for child_player_id in child_player_ids:
-            await self.cmd_group(child_player_id, target_player)
+            try:
+                self.logger.debug(
+                    "🎵 GROUP_MANY: Processing child player %s -> %s",
+                    child_player_id, target_player
+                )
+                await self.cmd_group(child_player_id, target_player)
+            except Exception as err:
+                self.logger.error(
+                    "🎵 GROUP_MANY: Failed to group %s to %s: %s",
+                    child_player_id, target_player, err
+                )
+                # Continue with other players even if one fails
+                continue
+        
+        self.logger.debug(
+            "🎵 GROUP_MANY: Completed grouping operation for %s",
+            target_player
+        )
 
     async def cmd_group(self, player_id: str, target_player: str) -> None:
         """Handle GROUP command for given player."""
@@ -724,12 +752,14 @@ class SlimprotoProvider(PlayerProvider):
         if child_player.synced_to and child_player.synced_to != target_player:
             raise RuntimeError("Player is already synced to another player")
 
-        # Ensure group_childs is properly managed to avoid duplicates
-        # This helps work around the AttributeError in the player controller
+        # Properly manage group_childs as a UniqueList to avoid duplicates and crashes
+        # The parent player should always be included in its own group_childs
         if parent_player.player_id not in parent_player.group_childs:
             parent_player.group_childs.append(parent_player.player_id)
         if child_player.player_id not in parent_player.group_childs:
             parent_player.group_childs.append(child_player.player_id)
+        
+        # Set the sync relationship
         child_player.synced_to = parent_player.player_id
         
         # Log the group formation for debugging
