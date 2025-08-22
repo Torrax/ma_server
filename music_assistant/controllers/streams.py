@@ -1037,7 +1037,7 @@ class StreamsController(CoreController):
                 input_format=plugin_source.audio_format,
                 output_format=output_format,
                 filter_params=player_filter_params,
-                extra_input_args=["-re"],
+##                extra_input_args=["-re"],
                 chunk_size=int(get_chunksize(output_format) / 10),
             ):
                 yield chunk
