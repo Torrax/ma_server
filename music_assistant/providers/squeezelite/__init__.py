@@ -371,7 +371,7 @@ class SlimprotoProvider(PlayerProvider):
                 url=media.uri,
                 media=media,
                 send_flush=True,
-                auto_play=False,
+                auto_play=True,
             )
             return
 
