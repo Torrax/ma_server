@@ -654,13 +654,48 @@ class SlimprotoProvider(PlayerProvider):
             len(parent_player.group_childs), parent_player.group_childs
         )
 
-        # kill any existing multi stream for the group leader before rebuilding
-        if (prev := self._multi_streams.pop(parent_player.player_id, None)) is not None:
-            await prev.stop()
-
-        # decide how to (re)start playback for the new group
+        # For plugin sources, we need to handle group changes more carefully
+        # to avoid stopping the underlying audio stream
         active_queue = self.mass.player_queues.get_active_queue(parent_player.player_id)
         plugin_active, plugin_id = self._detect_active_pluginsource(parent_player)
+
+        if plugin_active and plugin_id:
+            # Plugin source is active - we need to restart the multi-client stream
+            # but keep the plugin source running
+            self.logger.debug(
+                "Plugin source %s is active, restarting multi-client stream for new group size",
+                plugin_id
+            )
+            
+            # Stop existing multi-client stream
+            if (prev := self._multi_streams.pop(parent_player.player_id, None)) is not None:
+                await prev.stop()
+            
+            # Restart the plugin source with the new group configuration
+            # This will create a new multi-client stream with the correct expected_clients count
+            try:
+                source_provider = self.mass.get_provider(plugin_id)
+                if isinstance(source_provider, PluginProvider):
+                    source = source_provider.get_source()
+                    media = PlayerMedia(
+                        uri=await self.mass.streams.get_plugin_source_url(
+                            plugin_id, parent_player.player_id
+                        ),
+                        title=source.name,
+                        image_url=getattr(source.metadata, "image_url", None),
+                        media_type=MediaType.PLUGIN_SOURCE,
+                        custom_data={"source_id": plugin_id, "player_id": parent_player.player_id},
+                    )
+                    await self.play_media(parent_player.player_id, media)
+                    return
+            except Exception as err:
+                self.logger.error("Failed to restart plugin source for group: %s", err)
+                # fall through to plain updates on any error
+                pass
+        else:
+            # kill any existing multi stream for non-plugin sources
+            if (prev := self._multi_streams.pop(parent_player.player_id, None)) is not None:
+                await prev.stop()
 
         if active_queue.state == PlayerState.PLAYING and not plugin_active:
             # regular queue-backed playback: resume via queue like before
@@ -672,30 +707,6 @@ class SlimprotoProvider(PlayerProvider):
                 task_id=f"resume_{active_queue.queue_id}",
             )
         else:
-            # Plugin Source OR non-playing: restart as multi-client stream so the new member joins.
-            if plugin_active and plugin_id:
-                # stop the parent briefly to switch to the multi-client stream cleanly
-                if (sp := self.slimproto.get_player(parent_player.player_id)) is not None:
-                    await sp.stop()
-                try:
-                    source_provider = self.mass.get_provider(plugin_id)
-                    if isinstance(source_provider, PluginProvider):
-                        source = source_provider.get_source()
-                        media = PlayerMedia(
-                            uri=await self.mass.streams.get_plugin_source_url(
-                                plugin_id, parent_player.player_id
-                            ),
-                            title=source.name,
-                            image_url=getattr(source.metadata, "image_url", None),
-                            media_type=MediaType.PLUGIN_SOURCE,
-                            custom_data={"source_id": plugin_id, "player_id": parent_player.player_id},
-                        )
-                        await self.play_media(parent_player.player_id, media)
-                        return
-                except Exception:
-                    # fall through to plain updates on any error
-                    pass
-
             # make sure that the player manager gets an update
             self.mass.players.update(child_player.player_id, skip_forward=True)
             self.mass.players.update(parent_player.player_id, skip_forward=True)
@@ -727,20 +738,23 @@ class SlimprotoProvider(PlayerProvider):
         # Deduplicate remaining children and drop leader-id if it slipped in
         group_leader.group_childs = list({pid for pid in group_leader.group_childs if pid != group_leader.player_id})
 
-        # kill any existing multi stream for the leader before rebuilding
-        if (prev := self._multi_streams.pop(group_leader.player_id, None)) is not None:
-            await prev.stop()
-
         # Rebuild playback based on current source
         try:
             plugin_active, plugin_id = self._detect_active_pluginsource(group_leader)
             active_queue = self.mass.player_queues.get_active_queue(group_leader.player_id)
 
             if plugin_active and plugin_id:
-                # Stop the leader briefly and restart the plugin source so remaining members (if any)
-                # attach to a fresh multi-client session or single path if no children remain.
-                if (sp := self.slimproto.get_player(group_leader.player_id)) is not None:
-                    await sp.stop()
+                # Plugin source is active - handle carefully to avoid stopping the stream
+                self.logger.debug(
+                    "Plugin source %s is active, restarting for new group size after ungroup",
+                    plugin_id
+                )
+                
+                # Stop existing multi-client stream
+                if (prev := self._multi_streams.pop(group_leader.player_id, None)) is not None:
+                    await prev.stop()
+                
+                # Restart the plugin source with the new group configuration
                 try:
                     source_provider = self.mass.get_provider(plugin_id)
                     if isinstance(source_provider, PluginProvider):
@@ -757,20 +771,26 @@ class SlimprotoProvider(PlayerProvider):
                         await self.play_media(group_leader.player_id, media)
                     else:
                         self.mass.players.update(group_leader.player_id, skip_forward=True)
-                except Exception:
+                except Exception as err:
+                    self.logger.error("Failed to restart plugin source after ungroup: %s", err)
                     self.mass.players.update(group_leader.player_id, skip_forward=True)
-            elif active_queue.state == PlayerState.PLAYING:
-                # Queue-backed playback: resume to push the correct URL topology
-                self.mass.call_later(
-                    1,
-                    self.mass.player_queues.resume,
-                    active_queue.queue_id,
-                    fade_in=False,
-                    task_id=f"resume_{active_queue.queue_id}",
-                )
             else:
-                # Nothing playing, just push updates
-                self.mass.players.update(group_leader.player_id, skip_forward=True)
+                # kill any existing multi stream for non-plugin sources
+                if (prev := self._multi_streams.pop(group_leader.player_id, None)) is not None:
+                    await prev.stop()
+                
+                if active_queue.state == PlayerState.PLAYING:
+                    # Queue-backed playback: resume to push the correct URL topology
+                    self.mass.call_later(
+                        1,
+                        self.mass.player_queues.resume,
+                        active_queue.queue_id,
+                        fade_in=False,
+                        task_id=f"resume_{active_queue.queue_id}",
+                    )
+                else:
+                    # Nothing playing, just push updates
+                    self.mass.players.update(group_leader.player_id, skip_forward=True)
         finally:
             # Always update both players in manager
             self.mass.players.update(player.player_id, skip_forward=True)
