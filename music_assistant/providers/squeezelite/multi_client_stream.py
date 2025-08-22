@@ -120,27 +120,50 @@ class MultiClientStream:
 
     async def _runner(self) -> None:
         """Run the stream for the given audio source."""
-        # wait up to 5s for all expected subscribers to attach
+        # wait up to 10s for all expected subscribers to attach (increased for larger groups)
         expected_clients = max(1, int(self.expected_clients or 1))
         count = 0
-        while count < 50:
+        max_wait_iterations = 100  # 10 seconds total wait time
+        while count < max_wait_iterations:
             await asyncio.sleep(0.1)
             count += 1
             if len(self.subscribers) >= expected_clients:
                 break
+            # For groups of 3+, be more patient and log progress
+            if expected_clients >= 3 and count % 10 == 0:
+                LOGGER.debug(
+                    "Waiting for clients: %s/%s connected (waited %s ms)",
+                    len(self.subscribers), expected_clients, count * 100
+                )
+        
         LOGGER.debug(
-            "Starting multi-client stream with %s/%s clients",
+            "Starting multi-client stream with %s/%s clients (waited %s ms)",
             len(self.subscribers),
             self.expected_clients,
+            count * 100,
         )
+        
+        # Start streaming even if not all expected clients connected
+        # This prevents the stream from failing when there are connection timing issues
         async for chunk in self.audio_source:
+            # More robust client checking - don't stop if clients temporarily disconnect
             fail_count = 0
             while len(self.subscribers) == 0:
                 await asyncio.sleep(0.1)
                 fail_count += 1
-                if fail_count > 50:
-                    LOGGER.warning("No clients connected, stopping stream")
+                # Increased timeout for larger groups and better logging
+                if fail_count > 100:  # 10 seconds instead of 5
+                    LOGGER.warning(
+                        "No clients connected after %s seconds, stopping stream (expected: %s)",
+                        fail_count / 10, expected_clients
+                    )
                     return
+                # Log progress for debugging
+                if fail_count % 20 == 0:
+                    LOGGER.debug(
+                        "Waiting for clients to reconnect: %s seconds elapsed (expected: %s clients)",
+                        fail_count / 10, expected_clients
+                    )
             await asyncio.gather(
                 *[sub.put(chunk) for sub in self.subscribers], return_exceptions=True
             )
