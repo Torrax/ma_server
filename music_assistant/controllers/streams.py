@@ -349,6 +349,18 @@ class StreamsController(CoreController):
         player_id: str,
     ) -> str:
         """Get the url for the Plugin Source stream/proxy."""
+        # Check if this is a plugin provider that supports PCM output
+        try:
+            plugin_prov = self.mass.get_provider(plugin_source)
+            if hasattr(plugin_prov, 'get_source'):
+                plugin_source_obj = plugin_prov.get_source()
+                # For PCM plugin sources, prefer WAV format for better compatibility
+                if plugin_source_obj.audio_format.content_type.is_pcm():
+                    return f"{self._server.base_url}/pluginsource/{plugin_source}/{player_id}.wav"
+        except Exception:
+            # Fall back to configured codec if plugin inspection fails
+            pass
+            
         output_codec = ContentType.try_parse(
             await self.mass.config.get_player_config_value(player_id, CONF_OUTPUT_CODEC)
         )
