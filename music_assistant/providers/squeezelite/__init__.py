@@ -629,11 +629,9 @@ class SlimprotoProvider(PlayerProvider):
         if child_player.synced_to and child_player.synced_to != target_player:
             raise RuntimeError("Player is already synced to another player")
 
-        # ensure unique membership (avoid duplicates that break expected_clients)
-        group_child_ids = set(parent_player.group_childs)
-        group_child_ids.add(parent_player.player_id)
-        group_child_ids.add(child_player.player_id)
-        parent_player.group_childs = list(group_child_ids)
+        # always make sure that the parent player is part of the sync group
+        parent_player.group_childs.append(parent_player.player_id)
+        parent_player.group_childs.append(child_player.player_id)
         child_player.synced_to = parent_player.player_id
 
         # kill any existing multi stream for the group leader before rebuilding
@@ -1112,8 +1110,10 @@ class SlimprotoProvider(PlayerProvider):
 
         # all checks passed, start streaming!
         self.logger.debug(
-            "Start serving multi-client flow audio stream to %s",
+            "Start serving multi-client flow audio stream to %s (fmt=%s, prefer_wav_fastpass=%s)",
             child_player.display_name,
+            fmt,
+            getattr(stream, "prefer_wav_fastpass", False),
         )
         output_format = AudioFormat(content_type=ContentType.try_parse(fmt.split(";")[0]))
         # Ensure shape equals upstream PCM (so WAV header matches)
@@ -1121,8 +1121,18 @@ class SlimprotoProvider(PlayerProvider):
         output_format.bit_depth = stream.audio_format.bit_depth
         output_format.channels = stream.audio_format.channels
 
-        # WAV fast-pass: disable filters entirely so ffmpeg is not spawned
-        if output_format.content_type == ContentType.WAV and getattr(stream, "prefer_wav_fastpass", False):
+        # Enhanced WAV fast-pass logic: disable filters entirely for WAV plugin sources
+        use_wav_fastpass = (
+            output_format.content_type == ContentType.WAV 
+            and hasattr(stream, "prefer_wav_fastpass") 
+            and stream.prefer_wav_fastpass
+        )
+        
+        if use_wav_fastpass:
+            self.logger.debug(
+                "Using WAV fast-path for %s (no filters, no ffmpeg)", 
+                child_player.display_name
+            )
             filter_params = None
         else:
             filter_params = (
@@ -1132,6 +1142,16 @@ class SlimprotoProvider(PlayerProvider):
                 if child_player_id
                 else None
             )
+            if filter_params:
+                self.logger.debug(
+                    "Using ffmpeg path for %s with filters: %s", 
+                    child_player.display_name, filter_params
+                )
+            else:
+                self.logger.debug(
+                    "Using ffmpeg path for %s (no filters)", 
+                    child_player.display_name
+                )
 
         async for chunk in stream.get_stream(
             output_format=output_format,
