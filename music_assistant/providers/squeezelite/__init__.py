@@ -630,10 +630,10 @@ class SlimprotoProvider(PlayerProvider):
             raise RuntimeError("Player is already synced to another player")
 
         # ensure unique membership (avoid duplicates that break expected_clients)
-        ids = set(parent_player.group_childs)
-        ids.add(parent_player.player_id)
-        ids.add(child_player.player_id)
-        parent_player.group_childs = list(ids)
+        group_child_ids = set(parent_player.group_childs)
+        group_child_ids.add(parent_player.player_id)
+        group_child_ids.add(child_player.player_id)
+        parent_player.group_childs = list(group_child_ids)
         child_player.synced_to = parent_player.player_id
 
         # kill any existing multi stream for the group leader before rebuilding
