@@ -73,6 +73,10 @@ class MultiClientStream:
         )
         
         if use_wav_fastpath:
+            LOGGER.debug(
+                "MultiClientStream: Using WAV fast-path (no ffmpeg) - format match: %s, prefer_wav: %s, no filters: %s",
+                same_format, self.prefer_wav_fastpass, not filter_params
+            )
             # write an unspecified-length WAV header then raw PCM chunks
             wav_header = create_wave_header(
                 samplerate=output_format.sample_rate,
@@ -88,6 +92,10 @@ class MultiClientStream:
             return
 
         # default ffmpeg path for format conversion / filtering
+        LOGGER.debug(
+            "MultiClientStream: Using ffmpeg path - format match: %s, prefer_wav: %s, filters: %s",
+            same_format, self.prefer_wav_fastpass, filter_params
+        )
         async for chunk in get_ffmpeg_stream(
             audio_input=self.subscribe_raw(),
             input_format=self.audio_format,
