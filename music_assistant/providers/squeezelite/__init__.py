@@ -629,10 +629,20 @@ class SlimprotoProvider(PlayerProvider):
         if child_player.synced_to and child_player.synced_to != target_player:
             raise RuntimeError("Player is already synced to another player")
 
-        # always make sure that the parent player is part of the sync group
-        parent_player.group_childs.append(parent_player.player_id)
-        parent_player.group_childs.append(child_player.player_id)
+        # Ensure group_childs is properly managed to avoid duplicates
+        # This helps work around the AttributeError in the player controller
+        if parent_player.player_id not in parent_player.group_childs:
+            parent_player.group_childs.append(parent_player.player_id)
+        if child_player.player_id not in parent_player.group_childs:
+            parent_player.group_childs.append(child_player.player_id)
         child_player.synced_to = parent_player.player_id
+        
+        # Log the group formation for debugging
+        self.logger.debug(
+            "Grouped %s to %s. Group now has %s members: %s",
+            child_player.display_name, parent_player.display_name,
+            len(parent_player.group_childs), parent_player.group_childs
+        )
 
         # kill any existing multi stream for the group leader before rebuilding
         if (prev := self._multi_streams.pop(parent_player.player_id, None)) is not None:
