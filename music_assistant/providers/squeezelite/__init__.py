@@ -707,6 +707,12 @@ class SlimprotoProvider(PlayerProvider):
         self.logger.debug("No active plugin source detected for player %s", player.player_id)
         return False, None
 
+    async def cmd_group_many(self, target_player: str, child_player_ids: list[str]) -> None:
+        """Handle GROUP_MANY command - group multiple players to a target player."""
+        # For squeezelite, we handle this by calling cmd_group for each child player
+        for child_player_id in child_player_ids:
+            await self.cmd_group(child_player_id, target_player)
+
     async def cmd_group(self, player_id: str, target_player: str) -> None:
         """Handle GROUP command for given player."""
         child_player = self.mass.players.get(player_id)
@@ -791,7 +797,7 @@ class SlimprotoProvider(PlayerProvider):
                 await prev.stop()
 
         if active_queue.state == PlayerState.PLAYING and not plugin_active:
-            # regular queue-backed playback: resume via queue like before
+            # regular queue-backed playbook: resume via queue like before
             self.logger.warning(
                 "🎵 GROUP: Queue is playing and no plugin source, calling resume for queue %s",
                 active_queue.queue_id
