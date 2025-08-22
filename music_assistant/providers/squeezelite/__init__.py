@@ -608,6 +608,22 @@ class SlimprotoProvider(PlayerProvider):
 
     def _detect_active_pluginsource(self, player: Player) -> tuple[bool, str | None]:
         """Return (is_plugin_source_active, plugin_id) for the parent's current playback."""
+        # First check if there's an active multi-client stream for this player
+        # that was created for a plugin source
+        if player.player_id in self._multi_streams:
+            stream = self._multi_streams[player.player_id]
+            if hasattr(stream, "prefer_wav_fastpass") and stream.prefer_wav_fastpass:
+                # This stream was created for a plugin source, try to find which one
+                for provider_id, provider in self.mass.providers.items():
+                    if hasattr(provider, "get_source") and hasattr(provider, "_stream_active"):
+                        if getattr(provider, "_stream_active", False):
+                            self.logger.debug(
+                                "Detected active plugin source %s via multi-client stream", 
+                                provider_id
+                            )
+                            return True, provider_id
+        
+        # Check current media URI from player
         uri = ""
         if player and player.current_media and player.current_media.uri:
             uri = player.current_media.uri
@@ -615,17 +631,80 @@ class SlimprotoProvider(PlayerProvider):
             if slim := self.slimproto.get_player(player.player_id):
                 if slim.current_media and slim.current_media.metadata:
                     uri = slim.current_media.metadata.get("item_id", "") or ""
+        
         # Try to parse plugin id from the pluginsource URL
         if "/pluginsource/" in uri:
             try:
                 plugin_id = uri.split("/pluginsource/")[1].split("/")[0]
+                self.logger.debug(
+                    "Detected active plugin source %s via pluginsource URL: %s", 
+                    plugin_id, uri
+                )
                 return True, plugin_id
             except Exception:
                 pass
-        # Fallback to 'active_source' marker if present (set by streams when using plugin fast-pass)
+        
+        # Check for slimproto multi-client stream URLs
+        if "/slimproto/multi" in uri and "player_id=" in uri:
+            try:
+                # Extract the parent player ID from the multi-client stream URL
+                parent_player_id = uri.split("player_id=")[1].split("&")[0]
+                if parent_player_id in self._multi_streams:
+                    stream = self._multi_streams[parent_player_id]
+                    if hasattr(stream, "prefer_wav_fastpass") and stream.prefer_wav_fastpass:
+                        # This is a plugin source multi-client stream
+                        for provider_id, provider in self.mass.providers.items():
+                            if hasattr(provider, "get_source") and hasattr(provider, "_stream_active"):
+                                if getattr(provider, "_stream_active", False):
+                                    self.logger.debug(
+                                        "Detected active plugin source %s via slimproto multi URL", 
+                                        provider_id
+                                    )
+                                    return True, provider_id
+            except Exception:
+                pass
+        
+        # Check for active plugin sources by examining all plugin providers
+        for provider_id, provider in self.mass.providers.items():
+            if hasattr(provider, "get_source") and hasattr(provider, "_stream_active"):
+                # Check if this plugin provider has an active stream
+                if getattr(provider, "_stream_active", False):
+                    # Verify it's being used by this player or its group
+                    source = provider.get_source()
+                    if hasattr(source, "in_use_by"):
+                        in_use_by = source.in_use_by
+                        if in_use_by == player.player_id:
+                            self.logger.debug(
+                                "Detected active plugin source %s via provider state (direct)", 
+                                provider_id
+                            )
+                            return True, provider_id
+                        # Check if it's being used by the group leader
+                        if player.synced_to and in_use_by == player.synced_to:
+                            self.logger.debug(
+                                "Detected active plugin source %s via provider state (group leader)", 
+                                provider_id
+                            )
+                            return True, provider_id
+                        # Check if it's being used by any group member
+                        for child_id in player.group_childs:
+                            if in_use_by == child_id:
+                                self.logger.debug(
+                                    "Detected active plugin source %s via provider state (group member)", 
+                                    provider_id
+                                )
+                                return True, provider_id
+        
+        # Fallback to 'active_source' marker if present
         plugin_id = getattr(player, "active_source", None)
         if plugin_id and plugin_id != player.player_id:
+            self.logger.debug(
+                "Detected active plugin source %s via active_source marker", 
+                plugin_id
+            )
             return True, plugin_id
+        
+        self.logger.debug("No active plugin source detected for player %s", player.player_id)
         return False, None
 
     async def cmd_group(self, player_id: str, target_player: str) -> None:
@@ -662,14 +741,15 @@ class SlimprotoProvider(PlayerProvider):
         if plugin_active and plugin_id:
             # Plugin source is active - we need to restart the multi-client stream
             # but keep the plugin source running
-            self.logger.debug(
-                "Plugin source %s is active, restarting multi-client stream for new group size",
-                plugin_id
+            self.logger.warning(
+                "🎵 GROUP: Plugin source %s is active, restarting multi-client stream for new group size (members: %s)",
+                plugin_id, parent_player.group_childs
             )
             
             # Stop existing multi-client stream
             if (prev := self._multi_streams.pop(parent_player.player_id, None)) is not None:
                 await prev.stop()
+                self.logger.debug("🎵 GROUP: Stopped existing multi-client stream")
             
             # Restart the plugin source with the new group configuration
             # This will create a new multi-client stream with the correct expected_clients count
@@ -686,19 +766,36 @@ class SlimprotoProvider(PlayerProvider):
                         media_type=MediaType.PLUGIN_SOURCE,
                         custom_data={"source_id": plugin_id, "player_id": parent_player.player_id},
                     )
+                    self.logger.warning(
+                        "🎵 GROUP: Restarting plugin source %s with new group configuration",
+                        plugin_id
+                    )
                     await self.play_media(parent_player.player_id, media)
                     return
+                else:
+                    self.logger.error(
+                        "🎵 GROUP: Provider %s is not a PluginProvider, cannot restart",
+                        plugin_id
+                    )
             except Exception as err:
-                self.logger.error("Failed to restart plugin source for group: %s", err)
+                self.logger.error("🎵 GROUP: Failed to restart plugin source for group: %s", err)
                 # fall through to plain updates on any error
                 pass
         else:
+            self.logger.warning(
+                "🎵 GROUP: No plugin source detected (plugin_active=%s, plugin_id=%s), handling as regular queue",
+                plugin_active, plugin_id
+            )
             # kill any existing multi stream for non-plugin sources
             if (prev := self._multi_streams.pop(parent_player.player_id, None)) is not None:
                 await prev.stop()
 
         if active_queue.state == PlayerState.PLAYING and not plugin_active:
             # regular queue-backed playback: resume via queue like before
+            self.logger.warning(
+                "🎵 GROUP: Queue is playing and no plugin source, calling resume for queue %s",
+                active_queue.queue_id
+            )
             self.mass.call_later(
                 1,
                 self.mass.player_queues.resume,
@@ -708,6 +805,10 @@ class SlimprotoProvider(PlayerProvider):
             )
         else:
             # make sure that the player manager gets an update
+            self.logger.debug(
+                "🎵 GROUP: Not calling resume (queue_state=%s, plugin_active=%s), just updating players",
+                active_queue.state, plugin_active
+            )
             self.mass.players.update(child_player.player_id, skip_forward=True)
             self.mass.players.update(parent_player.player_id, skip_forward=True)
 
