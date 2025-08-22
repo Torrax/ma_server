@@ -578,9 +578,12 @@ class SlimprotoProvider(PlayerProvider):
             raise RuntimeError("Parent player is already synced!")
         if child_player.synced_to and child_player.synced_to != target_player:
             raise RuntimeError("Player is already synced to another player")
-        # always make sure that the parent player is part of the sync group
-        parent_player.group_childs.append(parent_player.player_id)
-        parent_player.group_childs.append(child_player.player_id)
+        
+        # Ensure unique membership and avoid duplicates that break expected_clients
+        ids = set(parent_player.group_childs)
+        ids.add(parent_player.player_id)
+        ids.add(child_player.player_id)
+        parent_player.group_childs = list(ids)
         child_player.synced_to = parent_player.player_id
         # check if we should (re)start or join a stream session
         # TODO: support late joining of a client into an existing stream session
