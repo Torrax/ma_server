@@ -439,29 +439,39 @@ class SlimprotoProvider(PlayerProvider):
                 output_format=master_audio_format,
             )
         
+        # Count actual sync clients for this group
+        sync_clients = list(self._get_sync_clients(player_id))
+        expected_client_count = len(sync_clients)
+        
         # start the stream task
         self._multi_streams[player_id] = stream = MultiClientStream(
             audio_source=audio_source, 
             audio_format=master_audio_format,
             prefer_wav_fastpass=prefer_wav_fastpass,
+            expected_clients=expected_client_count,
+        )
+
+        self.logger.debug(
+            "Starting multi-client stream for %s with %s expected clients: %s",
+            player.display_name, expected_client_count, 
+            [sp.player_id for sp in sync_clients]
         )
 
         # forward to downstream play_media commands
         async with TaskManager(self.mass) as tg:
-            for slimplayer in self._get_sync_clients(player_id):
+            for slimplayer in sync_clients:
                 # Use WAV format for plugin sources with PCM content to enable fast-path
                 if prefer_wav_fastpass:
                     fmt = "wav"
                 else:
                     # Use each player's configured codec for non-plugin sources
                     conf_output_codec = self.mass.config.get_raw_player_config_value(
-                        slimplayer.player_id, CONF_OUTPUT_CODEC, "flac"
+                        slimplayer.player_id, CONF_ENTRY_OUTPUT_CODEC.key, "flac"
                     )
                     fmt = str(conf_output_codec).split(";")[0].strip().lower() or "flac"
                 
                 base_url = f"{self.mass.streams.base_url}/slimproto/multi?player_id={player_id}&fmt={fmt}"
                 url = f"{base_url}&child_player_id={slimplayer.player_id}"
-                stream.expected_clients += 1
                 tg.create_task(
                     self._handle_play_url(
                         slimplayer,
