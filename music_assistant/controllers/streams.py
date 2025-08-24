@@ -62,6 +62,7 @@ from music_assistant.helpers.audio import (
     get_player_filter_params,
     get_silence,
     get_stream_details,
+    create_wave_header,  # WAV fast-path
 )
 from music_assistant.helpers.audio import LOGGER as AUDIO_LOGGER
 from music_assistant.helpers.ffmpeg import LOGGER as FFMPEG_LOGGER
@@ -83,6 +84,7 @@ if TYPE_CHECKING:
     from music_assistant_models.player_queue import PlayerQueue
     from music_assistant_models.queue_item import QueueItem
 
+    # Upstream location for Player type
     from music_assistant.models.player import Player
 
 
@@ -132,7 +134,7 @@ class StreamsController(CoreController):
         self._audio_cache_dir = os.path.join("/tmp/.audio")  # noqa: S108
         self.allow_cache_default = "auto"
         self._crossfade_data: dict[str, CrossfadeData] = {}
-        self._bind_ip: str = "0.0.0.0"
+        self._bind_ip: str = "0.0.0.0"  # upstream: remember the bind IP we actually use
 
     @property
     def base_url(self) -> str:
@@ -739,7 +741,47 @@ class StreamsController(CoreController):
         if request.method != "GET":
             return resp
 
-        # all checks passed, start streaming!
+        # >>> WAV fast-path: bypass ffmpeg when output = WAV and formats match
+        same_format = (
+            output_format.sample_rate == plugin_source.audio_format.sample_rate
+            and output_format.bit_depth == plugin_source.audio_format.bit_depth
+            and output_format.channels == plugin_source.audio_format.channels
+        )
+        if (
+            output_format.content_type == ContentType.WAV
+            and same_format
+            and plugin_source.stream_type == StreamType.CUSTOM
+        ):
+            # write a big/unspecified-length WAV header then raw PCM chunks
+            wav_header = create_wave_header(
+                samplerate=output_format.sample_rate,
+                channels=output_format.channels,
+                bitspersample=output_format.bit_depth,
+                duration=None,
+            )
+            try:
+                await resp.write(wav_header)
+            except (BrokenPipeError, ConnectionResetError, ConnectionError):
+                return resp
+
+            # stream raw PCM directly from the provider (ultra-low latency path)
+            audio_input = provider.get_audio_stream(player_id)
+            # mark source usage similar to ffmpeg path
+            player.active_source = plugin_source_id
+            plugin_source.in_use_by = player_id
+            try:
+                async for chunk in audio_input:
+                    try:
+                        await resp.write(chunk)
+                    except (BrokenPipeError, ConnectionResetError, ConnectionError):
+                        break
+            finally:
+                player.active_source = player.player_id
+                plugin_source.in_use_by = None
+            return resp
+        # <<< end WAV fast-path
+
+        # all checks passed, start streaming (default ffmpeg path)
         async for chunk in self.get_plugin_source_stream(
             plugin_source_id=plugin_source_id,
             output_format=output_format,
