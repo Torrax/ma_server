@@ -15,6 +15,9 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 ENV VIRTUAL_ENV=/app/venv
 RUN uv venv $VIRTUAL_ENV
 
+# install ALSA utilities (arecord)
+RUN apk add --no-cache alsa-utils
+
 # pre-install ALL requirements into the venv
 # comes at a cost of a slightly larger image size but is faster to start
 # because we do not have to install dependencies at runtime
@@ -46,6 +49,9 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
 # copy the already build /app dir
 COPY --from=builder /app /app
+
+# install ALSA utilities (arecord)
+RUN apk add --no-cache alsa-utils
 
 # the /app contents have correct permissions but for some reason /app itself does not.
 # so apply again, but ONLY to the dir (otherwise we increase the size)
